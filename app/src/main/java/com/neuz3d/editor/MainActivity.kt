@@ -162,6 +162,7 @@ class MainActivity : Activity() {
         val bottomTools = horizontalStrip()
         bottomTools.addView(toolButton("Save Scene") { saveScene() })
         bottomTools.addView(toolButton("Load Scene") { loadScene() })
+        bottomTools.addView(toolButton("Export JSON") { exportScene() })
         bottomTools.addView(toolButton("Import OBJ") { pickObj() })
         bottomTools.addView(toolButton("Quality") { cycleQuality() })
         bottom.addView(bottomTools)
@@ -237,14 +238,28 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun saveScene() {
+    private fun sceneJson(): String {
         val array = JSONArray()
         scene.forEach { o ->
             array.put(JSONObject().put("id", o.id).put("name", o.name).put("type", o.type)
                 .put("x", o.x).put("y", o.y).put("z", o.z).put("scale", o.scale).put("rotation", o.rotation))
         }
-        prefs.edit().putString("scene_json", array.toString()).putInt("next_id", nextId).putInt("selected_id", selectedId).apply()
+        return JSONObject().put("format", "neuz3d-scene").put("version", 1).put("objects", array).toString(2)
+    }
+
+    private fun saveScene() {
+        prefs.edit().putString("scene_json", sceneJson()).putInt("next_id", nextId).putInt("selected_id", selectedId).apply()
         Toast.makeText(this, "Scene saved on this device.", Toast.LENGTH_SHORT).show()
+    }
+
+    private val exportRequest = 7403
+    private fun exportScene() {
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "application/json"
+            putExtra(Intent.EXTRA_TITLE, "neuz-scene.json")
+        }
+        startActivityForResult(intent, exportRequest)
     }
 
     private fun loadScene() {
@@ -286,8 +301,19 @@ class MainActivity : Activity() {
     @Deprecated("Legacy activity result API retained for broad Android compatibility")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != objPickerRequest || resultCode != RESULT_OK) return
         val uri = data?.data ?: return
+        if (resultCode != RESULT_OK) return
+        if (requestCode == exportRequest) {
+            try {
+                contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(sceneJson()) }
+                    ?: error("Could not create output file")
+                Toast.makeText(this, "Scene JSON exported.", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Toast.makeText(this, "Export failed: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+            return
+        }
+        if (requestCode != objPickerRequest) return
         try {
             val text = contentResolver.openInputStream(uri)?.use { input ->
                 BufferedReader(InputStreamReader(input)).readText()
