@@ -149,8 +149,10 @@ class MainActivity : Activity() {
             },
             onFrame = {},
             onPick = { pickedId ->
-                selectedId = pickedId
-                syncSceneToRenderer()
+                runOnUiThread {
+                    selectedId = pickedId
+                    syncSceneToRenderer()
+                }
             }
         )
         viewport.setRenderer(renderer)
