@@ -99,7 +99,16 @@ class MainActivity : Activity() {
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
                 when (position) {
                     0 -> status.text = "Renderer: Automatic • GLES viewport active"
-                    1 -> status.text = "Renderer: OpenGL ES • " + renderer.version.ifBlank { "checking device…" }
+                    1 -> {
+                        val detected = renderer.version
+                        if (detected.contains("OpenGL ES 3.2", ignoreCase = true)) {
+                            status.text = "OpenGL ES 3.2 detected • $detected"
+                        } else {
+                            status.text = "GLES 3.2 not confirmed; current context: " + detected.ifBlank { "checking device…" }
+                            Toast.makeText(this@MainActivity,
+                                "This build requests an OpenGL ES 3.x context. It will not claim ES 3.2 unless the driver reports it.", Toast.LENGTH_LONG).show()
+                        }
+                    }
                     2 -> {
                         Toast.makeText(this@MainActivity,
                             "Vulkan is not implemented in this build yet. Staying on the working GLES renderer.", Toast.LENGTH_LONG).show()
