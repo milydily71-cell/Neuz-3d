@@ -45,6 +45,8 @@ class MainActivity : Activity() {
     private lateinit var objectLabel: TextView
     private lateinit var qualityPicker: Spinner
     private val scene = mutableListOf<SceneObject>()
+    private val undoStack = java.util.ArrayDeque<String>()
+    private val redoStack = java.util.ArrayDeque<String>()
     private var nextId = 1
     private var selectedId = 1
     private var quality = 1
@@ -155,6 +157,8 @@ class MainActivity : Activity() {
         }
         objectPanel.addView(objectLabel)
         val actionRow = horizontalStrip()
+        actionRow.addView(toolButton("Undo") { undo() })
+        actionRow.addView(toolButton("Redo") { redo() })
         actionRow.addView(toolButton("Move X+") { transformSelected(dx = 0.25f) })
         actionRow.addView(toolButton("Move Y+") { transformSelected(dy = 0.25f) })
         actionRow.addView(toolButton("Rotate") { transformSelected(rotation = 15f) })
@@ -208,7 +212,26 @@ class MainActivity : Activity() {
             }
         }
 
+    private fun checkpoint() {
+        undoStack.addLast(sceneJson())
+        while (undoStack.size > 80) undoStack.removeFirst()
+        redoStack.clear()
+    }
+
+    private fun undo() {
+        if (undoStack.isEmpty()) { Toast.makeText(this, "Nothing to undo.", Toast.LENGTH_SHORT).show(); return }
+        redoStack.addLast(sceneJson())
+        restoreSceneJson(undoStack.removeLast())
+    }
+
+    private fun redo() {
+        if (redoStack.isEmpty()) { Toast.makeText(this, "Nothing to redo.", Toast.LENGTH_SHORT).show(); return }
+        undoStack.addLast(sceneJson())
+        restoreSceneJson(redoStack.removeLast())
+    }
+
     private fun addObject(type: String) {
+        checkpoint()
         val name = when (type) {
             "Cube" -> "Cube"
             else -> type
@@ -225,6 +248,7 @@ class MainActivity : Activity() {
             Toast.makeText(this, "Keep at least one scene object.", Toast.LENGTH_SHORT).show()
             return
         }
+        checkpoint()
         scene.removeAll { it.id == selectedId }
         selectedId = scene.last().id
         syncSceneToRenderer()
@@ -232,6 +256,8 @@ class MainActivity : Activity() {
 
     private fun transformSelected(dx: Float = 0f, dy: Float = 0f, rotation: Float = 0f, scale: Float = 0f) {
         val obj = scene.firstOrNull { it.id == selectedId } ?: return
+        if (dx == 0f && dy == 0f && rotation == 0f && scale == 0f) return
+        checkpoint()
         obj.x += dx
         obj.y += dy
         obj.rotation += rotation
@@ -253,7 +279,8 @@ class MainActivity : Activity() {
             array.put(JSONObject().put("id", o.id).put("name", o.name).put("type", o.type)
                 .put("x", o.x).put("y", o.y).put("z", o.z).put("scale", o.scale).put("rotation", o.rotation))
         }
-        return JSONObject().put("format", "neuz3d-scene").put("version", 1).put("objects", array).toString(2)
+        return JSONObject().put("format", "neuz3d-scene").put("version", 1)
+            .put("nextId", nextId).put("selectedId", selectedId).put("objects", array).toString(2)
     }
 
     private fun saveScene() {
@@ -278,24 +305,29 @@ class MainActivity : Activity() {
             return
         }
         try {
-            val array = if (raw.trimStart().startsWith("[")) JSONArray(raw) else JSONObject(raw).getJSONArray("objects")
-            scene.clear()
-            for (i in 0 until array.length()) {
-                val o = array.getJSONObject(i)
-                scene.add(SceneObject(o.getInt("id"), o.getString("name"), o.optString("type", "Cube"),
-                    o.optDouble("x", 0.0).toFloat(), o.optDouble("y", 0.0).toFloat(),
-                    o.optDouble("z", 0.0).toFloat(), o.optDouble("scale", 1.0).toFloat(),
-                    o.optDouble("rotation", 0.0).toFloat()))
-            }
-            if (scene.isEmpty()) scene.add(SceneObject(nextId++, "Cube"))
-            nextId = max(prefs.getInt("next_id", 1), (scene.maxOfOrNull { it.id } ?: 0) + 1)
-            selectedId = prefs.getInt("selected_id", scene.first().id)
-            if (scene.none { it.id == selectedId }) selectedId = scene.first().id
-            syncSceneToRenderer()
+            restoreSceneJson(raw)
             Toast.makeText(this, "Scene loaded.", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             Toast.makeText(this, "Could not load scene: ${e.message}", Toast.LENGTH_LONG).show()
         }
+    }
+
+    private fun restoreSceneJson(raw: String) {
+        val wrapper = if (raw.trimStart().startsWith("[")) null else JSONObject(raw)
+        val array = if (wrapper == null) JSONArray(raw) else wrapper.getJSONArray("objects")
+        scene.clear()
+        for (i in 0 until array.length()) {
+            val o = array.getJSONObject(i)
+            scene.add(SceneObject(o.getInt("id"), o.getString("name"), o.optString("type", "Cube"),
+                o.optDouble("x", 0.0).toFloat(), o.optDouble("y", 0.0).toFloat(),
+                o.optDouble("z", 0.0).toFloat(), o.optDouble("scale", 1.0).toFloat(),
+                o.optDouble("rotation", 0.0).toFloat()))
+        }
+        if (scene.isEmpty()) scene.add(SceneObject(nextId++, "Cube"))
+        nextId = max(wrapper?.optInt("nextId", 1) ?: 1, (scene.maxOfOrNull { it.id } ?: 0) + 1)
+        selectedId = wrapper?.optInt("selectedId", scene.first().id) ?: scene.first().id
+        if (scene.none { it.id == selectedId }) selectedId = scene.first().id
+        syncSceneToRenderer()
     }
 
     private val objPickerRequest = 7402
