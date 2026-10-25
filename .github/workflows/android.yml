@@ -19,7 +19,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:
-      ANDROID_HOME: ${{ env.ANDROID_HOME }}
       GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dfile.encoding=UTF-8"
     steps:
       - name: Checkout
@@ -42,8 +41,7 @@ jobs:
       - name: Accept Android SDK licenses
         shell: bash
         run: |
-          set -o pipefail
-          yes | sdkmanager --licenses
+          yes | sdkmanager --licenses || true
 
       - name: Install pinned Android toolchain
         shell: bash
