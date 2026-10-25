@@ -15,10 +15,14 @@
 - Orbit camera using one-finger drag; pinch-to-zoom; reset-camera control.
 - Add Cube, Sphere, Light, and Camera scene entries; sphere primitives use generated triangle geometry.
 - Basic transform controls for the selected scene object: translate X/Y, rotate, scale, and delete.
+- Scene selection controls for cycling through hierarchy entries.
 - In-memory undo/redo history for scene edits, bounded to the most recent 80 snapshots.
 - Save/load scene object transforms and types to local app preferences.
-- Basic Wavefront OBJ geometry importer through Android's document picker; faces are triangulated and negative vertex indices are supported.
-- Three-step viewport quality selection control (currently a UI foundation; advanced quality scaling is not fully wired).
+- Undo/redo history (up to 80 scene snapshots).
+- Basic keyframe timeline with transform snapshots, interpolation, playback, and local keyframe persistence.
+- Wavefront OBJ geometry importer: triangulates polygon faces and resolves negative vertex indices.
+- Geometry-focused glTF 2.0/GLB 2.0 importer: indexed/non-indexed triangle primitives and embedded base64 buffers; external `.bin` files, materials/textures, skinning, morph targets and animation channels are not yet imported.
+- Three-step quality selector (advanced GPU quality scaling is not fully wired).
 - Native Vulkan loader/physical-device capability probe. This **does not** constitute a Vulkan renderer.
 
 ## Renderer selection and truthfulness
@@ -29,12 +33,12 @@ The renderer menu offers Automatic, OpenGL ES, and Vulkan. The visible viewport 
 
 ## Source status
 
-The features listed above are the features currently implemented in source. This repository does not label a UI placeholder or capability probe as a finished subsystem. A true Vulkan drawing backend, PBR material pipeline, GLB/glTF/FBX import, keyframe/timeline animation, movie export, and production-grade selection/gizmos are not implemented in this source version; they must not be treated as available in the APK.
+The features listed above are the features currently implemented in source. This repository does not label a UI placeholder or capability probe as a finished subsystem. A true Vulkan drawing backend, PBR material pipeline with image-based lighting/shadows/reflections, FBX import, glTF material/texture support, production-grade selection/gizmos, full camera/shot editor, and rendered movie export are not implemented in this source version; they must not be treated as available in the APK.
 
 ## Build locally in Android Studio
 
 1. Open the repository root in a recent Android Studio.
-2. Install Android SDK Platform 35, Android build tools 35.0.0, NDK 27.2.12479018, and CMake 3.22.1 if Android Studio does not install them automatically.
+2. Install Android SDK Platform 35, Android build tools 35.0.0, NDK 27.2.12479018, and CMake 3.22.1 if Android Studio does not install them automatically. CI is pinned to Ubuntu 24.04 to avoid runner-image changes.
 3. Sync Gradle and run the `app` configuration on an Android device or emulator.
 4. Or use the GitHub Actions workflow `.github/workflows/android.yml`; a successful run uploads `neuz3d-debug-apk`.
 
