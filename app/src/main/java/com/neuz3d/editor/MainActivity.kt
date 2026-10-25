@@ -50,7 +50,7 @@ class MainActivity : Activity() {
     private val scene = mutableListOf<SceneObject>()
     private val undoStack = java.util.ArrayDeque<String>()
     private val redoStack = java.util.ArrayDeque<String>()
-    private val keyframes = sortedMapOf<Int, List<SceneObject>>()
+    private val keyframes = java.util.TreeMap<Int, List<SceneObject>>()
     private val timelineHandler = Handler(Looper.getMainLooper())
     private var currentFrame = 0
     private var isPlaying = false
