@@ -15,6 +15,7 @@
 - Orbit camera using one-finger drag; pinch-to-zoom; reset-camera control.
 - Add Cube, Sphere, Light, and Camera scene entries; sphere primitives use generated triangle geometry.
 - Basic transform controls for the selected scene object: translate X/Y, rotate, scale, and delete.
+- In-memory undo/redo history for scene edits, bounded to the most recent 80 snapshots.
 - Save/load scene object transforms and types to local app preferences.
 - Basic Wavefront OBJ geometry importer through Android's document picker; faces are triangulated and negative vertex indices are supported.
 - Three-step viewport quality selection control (currently a UI foundation; advanced quality scaling is not fully wired).
@@ -26,16 +27,9 @@ The renderer menu offers Automatic, OpenGL ES, and Vulkan. The visible viewport 
 
 `GLSurfaceView.setEGLContextClientVersion(3)` requests an OpenGL ES 3.x context, **not a guaranteed ES 3.2 context**. The app currently does not claim exact ES 3.2 support. Exact version/extension validation and a dedicated GLES 3.2 capability gate remain required.
 
-## Planned next milestones
+## Source status
 
-1. Finish CI build and validate installation/lifecycle on a physical Android device.
-2. Add tap-to-select, real selection outlines/gizmos, undo/redo, scene hierarchy panel, and export.
-3. Add dedicated OpenGL ES capability detection and quality settings that actually change rendering cost.
-4. Implement a genuine Vulkan renderer: Android surface integration, swapchain, render pass/pipeline, device capability checks, and draw submission.
-5. Expand importer coverage: robust glTF/GLB parsing, textures/materials, and FBX via a vetted library/conversion path.
-6. Implement PBR metallic/roughness materials, image-based lighting, shadows, and reflections.
-7. Add animation keyframes, timeline/playback, camera tracks, shot editing, and movie export.
-8. Add project-file format, autosave, undo/redo, profiling, and device-specific performance presets.
+The features listed above are the features currently implemented in source. This repository does not label a UI placeholder or capability probe as a finished subsystem. A true Vulkan drawing backend, PBR material pipeline, GLB/glTF/FBX import, keyframe/timeline animation, movie export, and production-grade selection/gizmos are not implemented in this source version; they must not be treated as available in the APK.
 
 ## Build locally in Android Studio
 
