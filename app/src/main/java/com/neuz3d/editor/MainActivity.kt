@@ -375,6 +375,8 @@ class MainActivity : Activity() {
         private val temp = FloatArray(16)
         private var gridBuffer: FloatBuffer? = null
         private var cubeBuffer: FloatBuffer? = null
+        private var sphereBuffer: FloatBuffer? = null
+        private var sphereCount = 0
         private var axisBuffer: FloatBuffer? = null
         private var importedBuffer: FloatBuffer? = null
         private var gridCount = 0
@@ -462,6 +464,32 @@ class MainActivity : Activity() {
                 cube.add(v[0]); cube.add(v[1]); cube.add(v[2]); cube.add(c[0]); cube.add(c[1]); cube.add(c[2])
             }
             cubeBuffer = floatBuffer(cube.toFloatArray())
+            val sphere = ArrayList<Float>()
+            val rings = 12
+            val segments = 18
+            for (ring in 0 until rings) {
+                val lat0 = (-Math.PI / 2.0 + Math.PI * ring / rings)
+                val lat1 = (-Math.PI / 2.0 + Math.PI * (ring + 1) / rings)
+                for (seg in 0 until segments) {
+                    val lon0 = 2.0 * Math.PI * seg / segments
+                    val lon1 = 2.0 * Math.PI * (seg + 1) / segments
+                    val v00 = spherePoint(lat0, lon0); val v01 = spherePoint(lat0, lon1)
+                    val v10 = spherePoint(lat1, lon0); val v11 = spherePoint(lat1, lon1)
+                    addSphereVertex(sphere, v00); addSphereVertex(sphere, v10); addSphereVertex(sphere, v11)
+                    addSphereVertex(sphere, v00); addSphereVertex(sphere, v11); addSphereVertex(sphere, v01)
+                }
+            }
+            sphereBuffer = floatBuffer(sphere.toFloatArray())
+            sphereCount = sphere.size / 6
+        }
+
+        private fun spherePoint(lat: Double, lon: Double): FloatArray =
+            floatArrayOf((kotlin.math.cos(lat) * kotlin.math.cos(lon)).toFloat(),
+                kotlin.math.sin(lat).toFloat(), (kotlin.math.cos(lat) * kotlin.math.sin(lon)).toFloat())
+
+        private fun addSphereVertex(out: MutableList<Float>, p: FloatArray) {
+            out.add(p[0] * 0.5f); out.add(p[1] * 0.5f); out.add(p[2] * 0.5f)
+            out.add(0.35f); out.add(0.82f); out.add(0.58f)
         }
 
         private fun addLine(out: MutableList<Float>, x1: Float, y1: Float, z1: Float,
@@ -499,7 +527,8 @@ class MainActivity : Activity() {
                     Matrix.rotateM(model, 0, obj.rotation, 0f, 1f, 0f)
                     Matrix.scaleM(model, 0, obj.scale, obj.scale, obj.scale)
                     if (obj.id == selectedId) GLES20.glLineWidth(2f) else GLES20.glLineWidth(1f)
-                    drawBuffer(cubeBuffer, 36, GLES20.GL_TRIANGLES, model)
+                    if (obj.type == "Sphere") drawBuffer(sphereBuffer, sphereCount, GLES20.GL_TRIANGLES, model)
+                    else drawBuffer(cubeBuffer, 36, GLES20.GL_TRIANGLES, model)
                 }
             }
             importedBuffer?.let { buf ->
