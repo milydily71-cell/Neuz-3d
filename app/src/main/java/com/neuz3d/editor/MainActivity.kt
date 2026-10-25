@@ -8,6 +8,8 @@ import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.opengl.Matrix
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -48,6 +50,10 @@ class MainActivity : Activity() {
     private val scene = mutableListOf<SceneObject>()
     private val undoStack = java.util.ArrayDeque<String>()
     private val redoStack = java.util.ArrayDeque<String>()
+    private val keyframes = sortedMapOf<Int, List<SceneObject>>()
+    private val timelineHandler = Handler(Looper.getMainLooper())
+    private var currentFrame = 0
+    private var isPlaying = false
     private var nextId = 1
     private var selectedId = 1
     private var quality = 1
@@ -168,6 +174,12 @@ class MainActivity : Activity() {
         actionRow.addView(toolButton("Scale +") { transformSelected(scale = 0.1f) })
         actionRow.addView(toolButton("Reset View") { renderer.resetCamera() })
         objectPanel.addView(actionRow)
+        val timelineRow = horizontalStrip()
+        timelineRow.addView(toolButton("Keyframe") { captureKeyframe() })
+        timelineRow.addView(toolButton("Frame −") { stepTimeline(-1) })
+        timelineRow.addView(toolButton("Frame +") { stepTimeline(1) })
+        timelineRow.addView(toolButton("Play / Stop") { toggleTimeline() })
+        objectPanel.addView(timelineRow)
         root.addView(objectPanel)
 
         val bottom = LinearLayout(this).apply {
@@ -284,18 +296,112 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun sceneJson(): String {
+    private fun objectsJson(objects: List<SceneObject>): JSONArray {
         val array = JSONArray()
-        scene.forEach { o ->
+        objects.forEach { o ->
             array.put(JSONObject().put("id", o.id).put("name", o.name).put("type", o.type)
                 .put("x", o.x).put("y", o.y).put("z", o.z).put("scale", o.scale).put("rotation", o.rotation))
         }
-        return JSONObject().put("format", "neuz3d-scene").put("version", 1)
-            .put("nextId", nextId).put("selectedId", selectedId).put("objects", array).toString(2)
+        return array
+    }
+
+    private fun sceneJson(): String = JSONObject().put("format", "neuz3d-scene").put("version", 1)
+        .put("nextId", nextId).put("selectedId", selectedId).put("objects", objectsJson(scene)).toString(2)
+
+    private fun keyframesJson(): String {
+        val root = JSONObject()
+        keyframes.forEach { (frame, objects) -> root.put(frame.toString(), objectsJson(objects)) }
+        return root.toString()
+    }
+
+    private fun restoreKeyframes(raw: String?) {
+        keyframes.clear()
+        if (raw.isNullOrBlank()) return
+        val json = JSONObject(raw)
+        val keys = json.keys()
+        while (keys.hasNext()) {
+            val frameText = keys.next()
+            val frame = frameText.toIntOrNull() ?: continue
+            val array = json.optJSONArray(frameText) ?: continue
+            val list = ArrayList<SceneObject>()
+            for (i in 0 until array.length()) {
+                val o = array.getJSONObject(i)
+                list.add(SceneObject(o.getInt("id"), o.getString("name"), o.optString("type", "Cube"),
+                    o.optDouble("x", 0.0).toFloat(), o.optDouble("y", 0.0).toFloat(),
+                    o.optDouble("z", 0.0).toFloat(), o.optDouble("scale", 1.0).toFloat(),
+                    o.optDouble("rotation", 0.0).toFloat()))
+            }
+            keyframes[frame] = list
+        }
+    }
+
+    private fun captureKeyframe() {
+        keyframes[currentFrame] = scene.map { it.copy() }
+        prefs.edit().putString("timeline_keyframes", keyframesJson()).apply()
+        status.text = "Timeline • frame $currentFrame • ${keyframes.size} keyframe(s)"
+        Toast.makeText(this, "Keyframe stored at frame $currentFrame.", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun stepTimeline(delta: Int) {
+        currentFrame = (currentFrame + delta).coerceIn(0, 120)
+        applyTimelineFrame(currentFrame)
+        status.text = "Timeline • frame $currentFrame / 120 • ${keyframes.size} keyframe(s)"
+    }
+
+    private val timelineTick = object : Runnable {
+        override fun run() {
+            if (!isPlaying) return
+            val first = if (keyframes.isEmpty()) 0 else keyframes.firstKey()
+            val last = if (keyframes.isEmpty()) first else keyframes.lastKey()
+            currentFrame = if (currentFrame >= last) first else currentFrame + 1
+            applyTimelineFrame(currentFrame)
+            status.text = "Playing • frame $currentFrame / $last"
+            timelineHandler.postDelayed(this, 50L)
+        }
+    }
+
+    private fun toggleTimeline() {
+        if (isPlaying) {
+            isPlaying = false
+            timelineHandler.removeCallbacks(timelineTick)
+            status.text = "Timeline paused at frame $currentFrame"
+            return
+        }
+        if (keyframes.size < 2) {
+            Toast.makeText(this, "Add at least two keyframes at different frames to play animation.", Toast.LENGTH_LONG).show()
+            return
+        }
+        isPlaying = true
+        if (currentFrame < keyframes.firstKey() || currentFrame >= keyframes.lastKey()) currentFrame = keyframes.firstKey()
+        timelineHandler.post(timelineTick)
+    }
+
+    private fun applyTimelineFrame(frame: Int) {
+        if (keyframes.isEmpty()) return
+        val leftEntry = keyframes.floorEntry(frame) ?: keyframes.firstEntry()
+        val rightEntry = keyframes.ceilingEntry(frame) ?: keyframes.lastEntry()
+        val span = (rightEntry.key - leftEntry.key).coerceAtLeast(1)
+        val t = ((frame - leftEntry.key).toFloat() / span).coerceIn(0f, 1f)
+        val rightById = rightEntry.value.associateBy { it.id }
+        val animated = leftEntry.value.map { a ->
+            val b = rightById[a.id] ?: a
+            a.copy(
+                x = a.x + (b.x - a.x) * t,
+                y = a.y + (b.y - a.y) * t,
+                z = a.z + (b.z - a.z) * t,
+                scale = a.scale + (b.scale - a.scale) * t,
+                rotation = a.rotation + (b.rotation - a.rotation) * t
+            )
+        }
+        scene.clear()
+        scene.addAll(animated)
+        if (scene.none { it.id == selectedId } && scene.isNotEmpty()) selectedId = scene.first().id
+        syncSceneToRenderer()
     }
 
     private fun saveScene() {
-        prefs.edit().putString("scene_json", sceneJson()).putInt("next_id", nextId).putInt("selected_id", selectedId).apply()
+        prefs.edit().putString("scene_json", sceneJson()).putString("timeline_keyframes", keyframesJson())
+            .putInt("next_id", nextId).putInt("selected_id", selectedId).apply()
         Toast.makeText(this, "Scene saved on this device.", Toast.LENGTH_SHORT).show()
     }
 
@@ -317,7 +423,9 @@ class MainActivity : Activity() {
         }
         try {
             restoreSceneJson(raw)
-            Toast.makeText(this, "Scene loaded.", Toast.LENGTH_SHORT).show()
+            restoreKeyframes(prefs.getString("timeline_keyframes", null))
+            currentFrame = 0
+            Toast.makeText(this, "Scene and timeline loaded.", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             Toast.makeText(this, "Could not load scene: ${e.message}", Toast.LENGTH_LONG).show()
         }
@@ -423,7 +531,12 @@ class MainActivity : Activity() {
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
     override fun onResume() { super.onResume(); if (::viewport.isInitialized) viewport.onResume() }
-    override fun onPause() { if (::viewport.isInitialized) viewport.onPause(); super.onPause() }
+    override fun onPause() {
+        isPlaying = false
+        timelineHandler.removeCallbacks(timelineTick)
+        if (::viewport.isInitialized) viewport.onPause()
+        super.onPause()
+    }
 
     private class SceneRenderer(
         private val onGpuInfo: (String, String) -> Unit,
@@ -705,7 +818,7 @@ class MainActivity : Activity() {
 
         fun isGltf(bytes: ByteArray): Boolean {
             if (bytes.size >= 4 && ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).int == GLB_MAGIC) return true
-            return bytes.isNotEmpty() && bytes[0].toInt().toChar() == '{'
+            return String(bytes, 0, min(bytes.size, 32), StandardCharsets.UTF_8).trimStart().startsWith("{")
         }
 
         fun parse(bytes: ByteArray): Pair<FloatArray, Int> {
