@@ -554,6 +554,8 @@ class MainActivity : Activity() {
         private var aColor = 0
         private var uMvp = 0
         private var uLight = 0
+        private var uMetallic = -1
+        private var uRoughness = -1
         private var width = 1
         private var height = 1
         private var yaw = 35f
@@ -603,9 +605,9 @@ class MainActivity : Activity() {
             val vendor = GLES20.glGetString(GLES20.GL_RENDERER) ?: "GPU"
             onGpuInfo(version, vendor)
             val vs = compile(GLES20.GL_VERTEX_SHADER,
-                "attribute vec3 aPosition; attribute vec3 aColor; uniform mat4 uMvp; varying vec3 vColor; varying float vLight; void main(){ gl_Position=uMvp*vec4(aPosition,1.0); vColor=aColor; vLight=0.55+0.45*max(dot(normalize(vec3(0.35,0.8,0.5)),vec3(0.0,0.0,1.0)),0.0); }")
+                "attribute vec3 aPosition; attribute vec3 aColor; uniform mat4 uMvp; varying vec3 vColor; varying vec3 vNormal; void main(){ gl_Position=uMvp*vec4(aPosition,1.0); vColor=aColor; vNormal=normalize(aPosition); }")
             val fs = compile(GLES20.GL_FRAGMENT_SHADER,
-                "precision mediump float; varying vec3 vColor; varying float vLight; void main(){ gl_FragColor=vec4(vColor*vLight,1.0); }")
+                "precision highp float; varying vec3 vColor; varying vec3 vNormal; uniform float uMetallic; uniform float uRoughness; const float PI=3.14159265359; vec3 fresnelSchlick(float c,vec3 F0){return F0+(1.0-F0)*pow(clamp(1.0-c,0.0,1.0),5.0);} float D_GGX(vec3 N,vec3 H,float r){float a=r*r;float a2=a*a;float nh=max(dot(N,H),0.0);float d=nh*nh*(a2-1.0)+1.0;return a2/max(PI*d*d,0.0001);} float G1(float nv,float r){float k=(r+1.0);k=k*k/8.0;return nv/max(nv*(1.0-k)+k,0.0001);} void main(){vec3 N=normalize(vNormal);vec3 V=vec3(0.0,0.0,1.0);vec3 L=normalize(vec3(-0.45,0.85,0.55));vec3 H=normalize(V+L);float m=clamp(uMetallic,0.0,1.0);float r=clamp(uRoughness,0.045,1.0);float nv=max(dot(N,V),0.0);float nl=max(dot(N,L),0.0);vec3 albedo=max(vColor,vec3(0.0));vec3 F0=mix(vec3(0.04),albedo,m);vec3 F=fresnelSchlick(max(dot(H,V),0.0),F0);float D=D_GGX(N,H,r);float G=G1(nv,r)*G1(nl,r);vec3 spec=(D*G*F)/max(4.0*nv*nl,0.001);vec3 kd=(vec3(1.0)-F)*(1.0-m);float sky=clamp(N.y*0.5+0.5,0.0,1.0);vec3 env=mix(vec3(0.055,0.065,0.08),vec3(0.28,0.38,0.55),sky);vec3 color=kd*albedo*env+(kd*albedo/PI+spec)*vec3(3.0,2.85,2.65)*nl+F*env*(1.0-r*0.7);color=color/(color+vec3(1.0));color=pow(max(color,vec3(0.0)),vec3(1.0/2.2));gl_FragColor=vec4(color,1.0);}")
             program = GLES20.glCreateProgram()
             GLES20.glAttachShader(program, vs)
             GLES20.glAttachShader(program, fs)
@@ -618,7 +620,8 @@ class MainActivity : Activity() {
             aPosition = GLES20.glGetAttribLocation(program, "aPosition")
             aColor = GLES20.glGetAttribLocation(program, "aColor")
             uMvp = GLES20.glGetUniformLocation(program, "uMvp")
-            uLight = GLES20.glGetUniformLocation(program, "uLight")
+            uMetallic = GLES20.glGetUniformLocation(program, "uMetallic")
+            uRoughness = GLES20.glGetUniformLocation(program, "uRoughness")
             createGeometry()
         }
 
@@ -782,6 +785,8 @@ class MainActivity : Activity() {
             Matrix.multiplyMM(temp, 0, view, 0, modelMatrix, 0)
             Matrix.multiplyMM(mvp, 0, projection, 0, temp, 0)
             GLES20.glUniformMatrix4fv(uMvp, 1, false, mvp, 0)
+            if (uMetallic >= 0) GLES20.glUniform1f(uMetallic, if (quality >= 2) 0.38f else 0.12f)
+            if (uRoughness >= 0) GLES20.glUniform1f(uRoughness, when (quality) { 0 -> 0.82f; 1 -> 0.48f; else -> 0.24f })
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, getVbo(buffer))
             GLES20.glEnableVertexAttribArray(aPosition)
             GLES20.glEnableVertexAttribArray(aColor)
