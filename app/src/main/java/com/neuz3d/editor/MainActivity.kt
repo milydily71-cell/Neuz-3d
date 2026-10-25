@@ -59,6 +59,14 @@ class MainActivity : Activity() {
     private var quality = 1
     private val prefs by lazy { getSharedPreferences("neuz3d_scene", MODE_PRIVATE) }
 
+    data class ImportedMesh(
+        val positions: FloatArray,
+        val triangles: Int,
+        val baseColor: FloatArray = floatArrayOf(1f, 1f, 1f),
+        val metallic: Float = 0.05f,
+        val roughness: Float = 0.75f
+    )
+
     data class SceneObject(
         val id: Int,
         var name: String,
@@ -485,8 +493,8 @@ class MainActivity : Activity() {
                 ?: error("Could not open selected file")
             val parsed = if (GltfParser.isGltf(bytes)) GltfParser.parse(bytes)
                 else ObjParser.parse(String(bytes, StandardCharsets.UTF_8))
-            renderer.setImportedMesh(parsed.first, parsed.second)
-            status.text = "Imported model • ${parsed.second} triangles • geometry preview"
+            renderer.setImportedMesh(parsed)
+            status.text = "Imported model • ${parsed.triangles} triangles • PBR metallic ${"%.2f".format(Locale.US, parsed.metallic)} • roughness ${"%.2f".format(Locale.US, parsed.roughness)}"
             Toast.makeText(this, "Model geometry loaded into viewport.", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             Toast.makeText(this, "Model import failed: ${e.message}", Toast.LENGTH_LONG).show()
@@ -571,6 +579,9 @@ class MainActivity : Activity() {
         @Volatile private var quality: Int = 1
         @Volatile private var importedPositions: FloatArray? = null
         @Volatile private var importedTriangles: Int = 0
+        @Volatile private var importedBaseColor = floatArrayOf(1f, 1f, 1f)
+        @Volatile private var importedMetallic = 0.05f
+        @Volatile private var importedRoughness = 0.75f
         @Volatile var version: String = ""
             private set
         private var program = 0
@@ -580,6 +591,7 @@ class MainActivity : Activity() {
         private var uLight = 0
         private var uMetallic = -1
         private var uRoughness = -1
+        private var uBaseColor = -1
         private var width = 1
         private var height = 1
         private var yaw = 35f
@@ -636,10 +648,13 @@ class MainActivity : Activity() {
             }
             if (bestId >= 0) onPick(bestId)
         }
-        fun setImportedMesh(positions: FloatArray, triangles: Int) {
-            importedPositions = positions
-            importedTriangles = triangles
-            importedBuffer = floatBuffer(positions)
+        fun setImportedMesh(mesh: ImportedMesh) {
+            importedPositions = mesh.positions
+            importedTriangles = mesh.triangles
+            importedBaseColor = mesh.baseColor.copyOf()
+            importedMetallic = mesh.metallic
+            importedRoughness = mesh.roughness
+            importedBuffer = floatBuffer(mesh.positions)
         }
 
         override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
@@ -656,7 +671,7 @@ class MainActivity : Activity() {
             val vs = compile(GLES20.GL_VERTEX_SHADER,
                 "attribute vec3 aPosition; attribute vec3 aColor; uniform mat4 uMvp; varying vec3 vColor; varying vec3 vNormal; void main(){ gl_Position=uMvp*vec4(aPosition,1.0); vColor=aColor; vNormal=normalize(aPosition); }")
             val fs = compile(GLES20.GL_FRAGMENT_SHADER,
-                "precision highp float; varying vec3 vColor; varying vec3 vNormal; uniform float uMetallic; uniform float uRoughness; const float PI=3.14159265359; vec3 fresnelSchlick(float c,vec3 F0){return F0+(1.0-F0)*pow(clamp(1.0-c,0.0,1.0),5.0);} float D_GGX(vec3 N,vec3 H,float r){float a=r*r;float a2=a*a;float nh=max(dot(N,H),0.0);float d=nh*nh*(a2-1.0)+1.0;return a2/max(PI*d*d,0.0001);} float G1(float nv,float r){float k=(r+1.0);k=k*k/8.0;return nv/max(nv*(1.0-k)+k,0.0001);} void main(){vec3 N=normalize(vNormal);vec3 V=vec3(0.0,0.0,1.0);vec3 L=normalize(vec3(-0.45,0.85,0.55));vec3 H=normalize(V+L);float m=clamp(uMetallic,0.0,1.0);float r=clamp(uRoughness,0.045,1.0);float nv=max(dot(N,V),0.0);float nl=max(dot(N,L),0.0);vec3 albedo=max(vColor,vec3(0.0));vec3 F0=mix(vec3(0.04),albedo,m);vec3 F=fresnelSchlick(max(dot(H,V),0.0),F0);float D=D_GGX(N,H,r);float G=G1(nv,r)*G1(nl,r);vec3 spec=(D*G*F)/max(4.0*nv*nl,0.001);vec3 kd=(vec3(1.0)-F)*(1.0-m);float sky=clamp(N.y*0.5+0.5,0.0,1.0);vec3 env=mix(vec3(0.055,0.065,0.08),vec3(0.28,0.38,0.55),sky);vec3 color=kd*albedo*env+(kd*albedo/PI+spec)*vec3(3.0,2.85,2.65)*nl+F*env*(1.0-r*0.7);color=color/(color+vec3(1.0));color=pow(max(color,vec3(0.0)),vec3(1.0/2.2));gl_FragColor=vec4(color,1.0);}")
+                "precision highp float; varying vec3 vColor; varying vec3 vNormal; uniform float uMetallic; uniform float uRoughness; uniform vec3 uBaseColor; const float PI=3.14159265359; vec3 fresnelSchlick(float c,vec3 F0){return F0+(1.0-F0)*pow(clamp(1.0-c,0.0,1.0),5.0);} float D_GGX(vec3 N,vec3 H,float r){float a=r*r;float a2=a*a;float nh=max(dot(N,H),0.0);float d=nh*nh*(a2-1.0)+1.0;return a2/max(PI*d*d,0.0001);} float G1(float nv,float r){float k=(r+1.0);k=k*k/8.0;return nv/max(nv*(1.0-k)+k,0.0001);} void main(){vec3 N=normalize(vNormal);vec3 V=vec3(0.0,0.0,1.0);vec3 L=normalize(vec3(-0.45,0.85,0.55));vec3 H=normalize(V+L);float m=clamp(uMetallic,0.0,1.0);float r=clamp(uRoughness,0.045,1.0);float nv=max(dot(N,V),0.0);float nl=max(dot(N,L),0.0);vec3 albedo=max(vColor*uBaseColor,vec3(0.0));vec3 F0=mix(vec3(0.04),albedo,m);vec3 F=fresnelSchlick(max(dot(H,V),0.0),F0);float D=D_GGX(N,H,r);float G=G1(nv,r)*G1(nl,r);vec3 spec=(D*G*F)/max(4.0*nv*nl,0.001);vec3 kd=(vec3(1.0)-F)*(1.0-m);float sky=clamp(N.y*0.5+0.5,0.0,1.0);vec3 env=mix(vec3(0.055,0.065,0.08),vec3(0.28,0.38,0.55),sky);vec3 color=kd*albedo*env+(kd*albedo/PI+spec)*vec3(3.0,2.85,2.65)*nl+F*env*(1.0-r*0.7);color=color/(color+vec3(1.0));color=pow(max(color,vec3(0.0)),vec3(1.0/2.2));gl_FragColor=vec4(color,1.0);}")
             program = GLES20.glCreateProgram()
             GLES20.glAttachShader(program, vs)
             GLES20.glAttachShader(program, fs)
@@ -671,6 +686,7 @@ class MainActivity : Activity() {
             uMvp = GLES20.glGetUniformLocation(program, "uMvp")
             uMetallic = GLES20.glGetUniformLocation(program, "uMetallic")
             uRoughness = GLES20.glGetUniformLocation(program, "uRoughness")
+            uBaseColor = GLES20.glGetUniformLocation(program, "uBaseColor")
             createGeometry()
         }
 
@@ -829,6 +845,9 @@ class MainActivity : Activity() {
             Matrix.multiplyMM(temp, 0, view, 0, model, 0)
             Matrix.multiplyMM(mvp, 0, projection, 0, temp, 0)
             GLES20.glUniformMatrix4fv(uMvp, 1, false, mvp, 0)
+            if (uMetallic >= 0) GLES20.glUniform1f(uMetallic, importedMetallic)
+            if (uRoughness >= 0) GLES20.glUniform1f(uRoughness, importedRoughness)
+            if (uBaseColor >= 0) GLES20.glUniform3f(uBaseColor, importedBaseColor[0], importedBaseColor[1], importedBaseColor[2])
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, getVbo(buf))
             GLES20.glEnableVertexAttribArray(aPosition)
             GLES20.glVertexAttribPointer(aPosition, 3, GLES20.GL_FLOAT, false, 0, 0)
@@ -846,6 +865,7 @@ class MainActivity : Activity() {
             GLES20.glUniformMatrix4fv(uMvp, 1, false, mvp, 0)
             if (uMetallic >= 0) GLES20.glUniform1f(uMetallic, if (quality >= 2) 0.38f else 0.12f)
             if (uRoughness >= 0) GLES20.glUniform1f(uRoughness, when (quality) { 0 -> 0.82f; 1 -> 0.48f; else -> 0.24f })
+            if (uBaseColor >= 0) GLES20.glUniform3f(uBaseColor, 1f, 1f, 1f)
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, getVbo(buffer))
             GLES20.glEnableVertexAttribArray(aPosition)
             GLES20.glEnableVertexAttribArray(aColor)
@@ -885,7 +905,7 @@ class MainActivity : Activity() {
             return String(bytes, 0, min(bytes.size, 32), StandardCharsets.UTF_8).trimStart().startsWith("{")
         }
 
-        fun parse(bytes: ByteArray): Pair<FloatArray, Int> {
+        fun parse(bytes: ByteArray): ImportedMesh {
             var jsonText: String
             var binaryChunk: ByteArray? = null
             if (bytes.size >= 12 && ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).int == GLB_MAGIC) {
@@ -909,6 +929,23 @@ class MainActivity : Activity() {
                 jsonText = String(bytes, StandardCharsets.UTF_8)
             }
             val root = JSONObject(jsonText)
+            var baseColor = floatArrayOf(1f, 1f, 1f)
+            var metallic = 1f
+            var roughness = 1f
+            val materials = root.optJSONArray("materials")
+            if (materials != null && materials.length() > 0) {
+                val pbr = materials.getJSONObject(0).optJSONObject("pbrMetallicRoughness")
+                if (pbr != null) {
+                    val factor = pbr.optJSONArray("baseColorFactor")
+                    if (factor != null && factor.length() >= 3) {
+                        baseColor = floatArrayOf(factor.optDouble(0, 1.0).toFloat().coerceIn(0f, 1f),
+                            factor.optDouble(1, 1.0).toFloat().coerceIn(0f, 1f),
+                            factor.optDouble(2, 1.0).toFloat().coerceIn(0f, 1f))
+                    }
+                    metallic = pbr.optDouble("metallicFactor", 1.0).toFloat().coerceIn(0f, 1f)
+                    roughness = pbr.optDouble("roughnessFactor", 1.0).toFloat().coerceIn(0.045f, 1f)
+                }
+            }
             val buffersJson = root.optJSONArray("buffers") ?: error("glTF has no buffers")
             val buffers = ArrayList<ByteArray>()
             for (i in 0 until buffersJson.length()) {
@@ -956,7 +993,7 @@ class MainActivity : Activity() {
             require(output.size % 9 == 0) { "Imported geometry is not a triangle list" }
             val maxAbs = output.maxOf { kotlin.math.abs(it) }.coerceAtLeast(0.001f)
             val normalized = output.map { it / maxAbs * 1.5f }.toFloatArray()
-            return Pair(normalized, normalized.size / 9)
+            return ImportedMesh(normalized, normalized.size / 9, baseColor, metallic, roughness)
         }
 
         private fun readFloatVec3(accessors: JSONArray, views: JSONArray, buffers: List<ByteArray>, index: Int): FloatArray {
@@ -1011,7 +1048,7 @@ class MainActivity : Activity() {
 
     private object ObjParser {
         /** Minimal Wavefront OBJ geometry importer: triangulates polygon faces and resolves negative indices. */
-        fun parse(source: String): Pair<FloatArray, Int> {
+        fun parse(source: String): ImportedMesh {
             val vertices = mutableListOf<FloatArray>()
             val output = ArrayList<Float>()
             source.lineSequence().forEach { raw ->
@@ -1037,7 +1074,7 @@ class MainActivity : Activity() {
             require(output.isNotEmpty()) { "No valid triangular face geometry found" }
             val maxAbs = output.maxOf { kotlin.math.abs(it) }.coerceAtLeast(0.001f)
             val normalized = output.map { it / maxAbs * 1.5f }.toFloatArray()
-            return Pair(normalized, normalized.size / 9)
+            return ImportedMesh(normalized, normalized.size / 9)
         }
     }
 }
