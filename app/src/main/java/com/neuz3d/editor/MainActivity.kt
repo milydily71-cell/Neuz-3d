@@ -147,7 +147,11 @@ class MainActivity : Activity() {
                     status.text = "GPU: $rendererName • $v"
                 }
             },
-            onFrame = {}
+            onFrame = {},
+            onPick = { pickedId ->
+                selectedId = pickedId
+                syncSceneToRenderer()
+            }
         )
         viewport.setRenderer(renderer)
         viewport.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
@@ -495,10 +499,17 @@ class MainActivity : Activity() {
 
     private var lastX = 0f
     private var lastY = 0f
+    private var touchStartX = 0f
+    private var touchStartY = 0f
+    private var touchMoved = false
     private var lastDistance = 0f
     private fun handleViewportTouch(event: MotionEvent): Boolean {
         when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> { lastX = event.x; lastY = event.y; return true }
+            MotionEvent.ACTION_DOWN -> {
+                lastX = event.x; lastY = event.y
+                touchStartX = event.x; touchStartY = event.y; touchMoved = false
+                return true
+            }
             MotionEvent.ACTION_POINTER_DOWN -> {
                 if (event.pointerCount >= 2) lastDistance = distance(event)
                 return true
@@ -511,13 +522,19 @@ class MainActivity : Activity() {
                 } else {
                     val dx = event.x - lastX
                     val dy = event.y - lastY
-                    renderer.orbit(dx * 0.45f, dy * 0.35f)
+                    if (kotlin.math.abs(event.x - touchStartX) + kotlin.math.abs(event.y - touchStartY) > dp(10)) touchMoved = true
+                    if (touchMoved) renderer.orbit(dx * 0.45f, dy * 0.35f)
                 }
                 lastX = event.x
                 lastY = event.y
                 return true
             }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { lastDistance = 0f; return true }
+            MotionEvent.ACTION_UP -> {
+                if (!touchMoved && event.pointerCount == 1) viewport.queueEvent { renderer.pickAt(event.x, event.y) }
+                lastDistance = 0f
+                return true
+            }
+            MotionEvent.ACTION_CANCEL -> { lastDistance = 0f; return true }
         }
         return true
     }
@@ -540,7 +557,8 @@ class MainActivity : Activity() {
 
     private class SceneRenderer(
         private val onGpuInfo: (String, String) -> Unit,
-        private val onFrame: () -> Unit
+        private val onFrame: () -> Unit,
+        private val onPick: (Int) -> Unit
     ) : GLSurfaceView.Renderer {
         @Volatile private var objects: List<SceneObject> = emptyList()
         @Volatile private var selectedId: Int = 1
@@ -572,6 +590,7 @@ class MainActivity : Activity() {
         private var sphereCount = 0
         private var axisBuffer: FloatBuffer? = null
         private var markerBuffer: FloatBuffer? = null
+        private var gizmoBuffer: FloatBuffer? = null
         private var importedBuffer: FloatBuffer? = null
         private val vboCache = java.util.IdentityHashMap<FloatBuffer, Int>()
         private var gridCount = 0
@@ -587,6 +606,29 @@ class MainActivity : Activity() {
         }
         fun zoomBy(factor: Float) { distance = (distance * factor).coerceIn(2.5f, 35f) }
         fun resetCamera() { yaw = 35f; pitch = 24f; distance = 9f }
+        fun pickAt(screenX: Float, screenY: Float) {
+            val mvpPick = FloatArray(16)
+            val modelPick = FloatArray(16)
+            val eye = FloatArray(4)
+            val clipPosition = floatArrayOf(0f, 0f, 0f, 1f)
+            var bestId = -1
+            var bestDistance = 56f * 56f
+            for (obj in objects) {
+                if (obj.type == "Light" || obj.type == "Camera") continue
+                Matrix.setIdentityM(modelPick, 0)
+                Matrix.translateM(modelPick, 0, obj.x, obj.y + 0.5f, obj.z)
+                Matrix.multiplyMM(mvpPick, 0, view, 0, modelPick, 0)
+                Matrix.multiplyMM(mvpPick, 0, projection, 0, mvpPick, 0)
+                Matrix.multiplyMV(eye, 0, mvpPick, 0, clipPosition, 0)
+                if (eye[3] <= 0f) continue
+                val sx = (eye[0] / eye[3] * 0.5f + 0.5f) * width
+                val sy = (1f - (eye[1] / eye[3] * 0.5f + 0.5f)) * height
+                val dx = sx - screenX; val dy = sy - screenY
+                val d2 = dx * dx + dy * dy
+                if (d2 < bestDistance) { bestDistance = d2; bestId = obj.id }
+            }
+            if (bestId >= 0) onPick(bestId)
+        }
         fun setImportedMesh(positions: FloatArray, triangles: Int) {
             importedPositions = positions
             importedTriangles = triangles
@@ -644,6 +686,11 @@ class MainActivity : Activity() {
             addLine(marker, 0f, -0.45f, 0f, 0f, 0.45f, 0f, 1f, 0.72f, 0.20f)
             addLine(marker, 0f, 0f, -0.45f, 0f, 0f, 0.45f, 1f, 0.72f, 0.20f)
             markerBuffer = floatBuffer(marker.toFloatArray())
+            val gizmo = ArrayList<Float>()
+            addLine(gizmo, 0f, 0f, 0f, 1.35f, 0f, 0f, 1f, 0.2f, 0.2f)
+            addLine(gizmo, 0f, 0f, 0f, 0f, 1.35f, 0f, 0.25f, 1f, 0.35f)
+            addLine(gizmo, 0f, 0f, 0f, 0f, 0f, 1.35f, 0.2f, 0.5f, 1f)
+            gizmoBuffer = floatBuffer(gizmo.toFloatArray())
             val cube = ArrayList<Float>()
             val p = arrayOf(
                 floatArrayOf(-0.5f,-0.5f, 0.5f), floatArrayOf(0.5f,-0.5f, 0.5f),
@@ -731,6 +778,11 @@ class MainActivity : Activity() {
                     if (obj.id == selectedId) GLES20.glLineWidth(2f) else GLES20.glLineWidth(1f)
                     if (obj.type == "Sphere") drawBuffer(sphereBuffer, sphereCount, GLES20.GL_TRIANGLES, model)
                     else drawBuffer(cubeBuffer, 36, GLES20.GL_TRIANGLES, model)
+                    if (obj.id == selectedId) {
+                        Matrix.setIdentityM(model, 0)
+                        Matrix.translateM(model, 0, obj.x, obj.y + 0.5f, obj.z)
+                        drawBuffer(gizmoBuffer, 6, GLES20.GL_LINES, model)
+                    }
                 }
             }
             importedBuffer?.let { buf ->
