@@ -1,45 +1,49 @@
 # Neuz 3D
 
-**Neuz 3D** is a native-first Android 3D modeling, animation, scene-building, and 3D movie/game-maker project inspired by mobile tools such as Prisma3D.
+**Neuz 3D** is a native-first Android 3D editor and the foundation for a mobile modeling, animation, and 3D movie-making studio inspired by mobile 3D creation tools.
 
-The project target is Kotlin for the Android editor and lifecycle, with a C++ native rendering core. No HTML/WebView editor is planned.
+- Android UI: Kotlin / native Android views (no HTML or WebView editor)
+- Native core: C++20, JNI, CMake
+- Current visible renderer: Android OpenGL ES 3.x context using GLES shader/draw APIs
+- Build: Android Gradle Plugin + CMake, GitHub Actions debug APK artifact workflow
 
-## Rendering architecture
+## Implemented in the current editor foundation
 
-- **Vulkan**: a real Vulkan renderer selected only after runtime capability and surface/device initialization checks succeed.
-- **OpenGL ES 3.2**: a native GLES 3.2 renderer with shader compilation and capability checks.
-- **Automatic**: prefer Vulkan when supported and initialization succeeds; otherwise fall back to GLES 3.2, then show a clear unsupported-device message if neither path is usable.
-- A graphics dropdown allows users to choose **Automatic**, **Vulkan**, or **OpenGL ES 3.2**. Unsupported/manual selections must be disabled or explain why they cannot run.
-- Render quality tiers should scale resolution, shadows, reflections, anti-aliasing, texture quality, and post-processing to device capabilities and thermal limits.
+- Native Android app shell and C++ JNI library.
+- GPU/GLSL vendor/version status in the editor.
+- Perspective 3D viewport with a ground grid, red/blue axes, and a colored cube mesh.
+- Orbit camera using one-finger drag; pinch-to-zoom; reset-camera control.
+- Add Cube, Sphere, Light, and Camera scene entries; sphere primitives use generated triangle geometry.
+- Basic transform controls for the selected scene object: translate X/Y, rotate, scale, and delete.
+- Save/load scene object transforms and types to local app preferences.
+- Basic Wavefront OBJ geometry importer through Android's document picker; faces are triangulated and negative vertex indices are supported.
+- Three-step viewport quality selection control (currently a UI foundation; advanced quality scaling is not fully wired).
+- Native Vulkan loader/physical-device capability probe. This **does not** constitute a Vulkan renderer.
 
-## Planned editor features
+## Renderer selection and truthfulness
 
-- Touch-first 3D viewport, orbit/pan/zoom, grid, axes, selection, transform gizmos, object hierarchy, and inspector.
-- Mesh primitives and modeling operations, materials, texture assignment, PBR metallic/roughness workflow.
-- Image-based lighting (environment maps), directional/point/spot lights, shadow maps, and screen-space or probe-based reflections where supported.
-- Import/export pipeline for GLB, glTF, OBJ, and FBX. Format support must be implemented and tested per format; FBX may require a native conversion/import library and licensing review.
-- Timeline, keyframes, animation tracks, camera animation, scene shots, and movie rendering/export.
-- Scene/project save/load, undo/redo, asset browser, and diagnostics.
-- Android Studio Gradle + CMake build workflow and GitHub Actions APK artifact workflow.
+The renderer menu offers Automatic, OpenGL ES, and Vulkan. The visible viewport currently uses OpenGL ES. Vulkan selection explains that the Vulkan rendering backend is not implemented yet and remains on the working GLES viewport. The native core attempts to create a Vulkan instance and enumerate a physical device so capability reporting can be developed, but it does not yet create an Android surface/swapchain or submit Vulkan draw calls.
 
-## Build requirements
+`GLSurfaceView.setEGLContextClientVersion(3)` requests an OpenGL ES 3.x context, **not a guaranteed ES 3.2 context**. The app currently does not claim exact ES 3.2 support. Exact version/extension validation and a dedicated GLES 3.2 capability gate remain required.
 
-- Android Studio with a recent Android SDK/NDK and CMake.
-- Kotlin/Android host plus C++ native renderer through JNI.
-- Native shader sources for Vulkan and GLES; do not label a renderer "supported" until device detection, initialization, shader compilation, and a visible render pass succeed.
-- CI should compile the Android app and upload a debug APK artifact. Device-only GPU behavior still needs on-device smoke testing.
+## Planned next milestones
 
-## Development status
+1. Finish CI build and validate installation/lifecycle on a physical Android device.
+2. Add tap-to-select, real selection outlines/gizmos, undo/redo, scene hierarchy panel, and export.
+3. Add dedicated OpenGL ES capability detection and quality settings that actually change rendering cost.
+4. Implement a genuine Vulkan renderer: Android surface integration, swapchain, render pass/pipeline, device capability checks, and draw submission.
+5. Expand importer coverage: robust glTF/GLB parsing, textures/materials, and FBX via a vetted library/conversion path.
+6. Implement PBR metallic/roughness materials, image-based lighting, shadows, and reflections.
+7. Add animation keyframes, timeline/playback, camera tracks, shot editing, and movie export.
+8. Add project-file format, autosave, undo/redo, profiling, and device-specific performance presets.
 
-This repository is being bootstrapped. The feature list above is the target roadmap, **not a claim that every feature is already implemented**. Vulkan, GLES, importers, PBR, animation, and APK generation each need implementation and verification milestones.
+## Build locally in Android Studio
 
-## Suggested milestones
+1. Open the repository root in a recent Android Studio.
+2. Install Android SDK Platform 35, Android build tools 35.0.0, NDK 27.2.12479018, and CMake 3.22.1 if Android Studio does not install them automatically.
+3. Sync Gradle and run the `app` configuration on an Android device or emulator.
+4. Or use the GitHub Actions workflow `.github/workflows/android.yml`; a successful run uploads `neuz3d-debug-apk`.
 
-1. Android app skeleton, native CMake target, capability report, and CI APK.
-2. Working GLES 3.2 viewport with grid, axes, and a lit test mesh.
-3. Real Vulkan instance/device/swapchain/render pass and shader pipeline, tested on a Vulkan-capable device.
-4. Shared scene graph, camera controls, hierarchy, transforms, and project serialization.
-5. PBR materials, environment lighting, shadows, and reflections.
-6. glTF/GLB and OBJ import/export; FBX support after library selection.
-7. Timeline, keyframe animation, camera tracks, and movie export.
-8. Modeling tools, undo/redo, performance profiling, and device-specific quality presets.
+## Verification status
+
+The source and CI workflow have been committed. A successful GitHub Actions run, APK artifact, physical-device smoke test, and Vulkan rendering have **not** been verified yet. Do not treat planned items as implemented features.
