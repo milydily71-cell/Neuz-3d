@@ -269,7 +269,7 @@ class MainActivity : Activity() {
             return
         }
         try {
-            val array = JSONArray(raw)
+            val array = if (raw.trimStart().startsWith("[")) JSONArray(raw) else JSONObject(raw).getJSONArray("objects")
             scene.clear()
             for (i in 0 until array.length()) {
                 val o = array.getJSONObject(i)
