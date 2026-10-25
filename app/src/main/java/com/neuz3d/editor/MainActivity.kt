@@ -25,6 +25,7 @@ import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.charset.StandardCharsets
 import java.nio.FloatBuffer
 import java.util.Locale
 import javax.microedition.khronos.egl.EGLConfig
@@ -128,6 +129,8 @@ class MainActivity : Activity() {
         tools.addView(toolButton("+ Light") { addObject("Light") })
         tools.addView(toolButton("+ Camera") { addObject("Camera") })
         tools.addView(toolButton("Delete") { deleteSelected() })
+        tools.addView(toolButton("Select ◀") { selectAdjacent(-1) })
+        tools.addView(toolButton("Select ▶") { selectAdjacent(1) })
         root.addView(tools)
 
         viewport = GLSurfaceView(this)
@@ -176,7 +179,8 @@ class MainActivity : Activity() {
         bottomTools.addView(toolButton("Save Scene") { saveScene() })
         bottomTools.addView(toolButton("Load Scene") { loadScene() })
         bottomTools.addView(toolButton("Export JSON") { exportScene() })
-        bottomTools.addView(toolButton("Import OBJ") { pickObj() })
+        bottomTools.addView(toolButton("Import OBJ") { pickModel() })
+        bottomTools.addView(toolButton("Import glTF/GLB") { pickModel() })
         bottomTools.addView(toolButton("Quality") { cycleQuality() })
         bottom.addView(bottomTools)
         status = TextView(this).apply {
@@ -228,6 +232,13 @@ class MainActivity : Activity() {
         if (redoStack.isEmpty()) { Toast.makeText(this, "Nothing to redo.", Toast.LENGTH_SHORT).show(); return }
         undoStack.addLast(sceneJson())
         restoreSceneJson(redoStack.removeLast())
+    }
+
+    private fun selectAdjacent(direction: Int) {
+        if (scene.isEmpty()) return
+        val index = scene.indexOfFirst { it.id == selectedId }.let { if (it < 0) 0 else it }
+        selectedId = scene[(index + direction + scene.size) % scene.size].id
+        syncSceneToRenderer()
     }
 
     private fun addObject(type: String) {
@@ -331,7 +342,7 @@ class MainActivity : Activity() {
     }
 
     private val objPickerRequest = 7402
-    private fun pickObj() {
+    private fun pickModel() {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "*/*"
@@ -356,15 +367,15 @@ class MainActivity : Activity() {
         }
         if (requestCode != objPickerRequest) return
         try {
-            val text = contentResolver.openInputStream(uri)?.use { input ->
-                BufferedReader(InputStreamReader(input)).readText()
-            } ?: error("Could not open file")
-            val parsed = ObjParser.parse(text)
+            val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                ?: error("Could not open selected file")
+            val parsed = if (GltfParser.isGltf(bytes)) GltfParser.parse(bytes)
+                else ObjParser.parse(String(bytes, StandardCharsets.UTF_8))
             renderer.setImportedMesh(parsed.first, parsed.second)
-            status.text = "Imported OBJ • ${parsed.second} triangles • mesh preview"
-            Toast.makeText(this, "OBJ geometry loaded into viewport.", Toast.LENGTH_SHORT).show()
+            status.text = "Imported model • ${parsed.second} triangles • geometry preview"
+            Toast.makeText(this, "Model geometry loaded into viewport.", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
-            Toast.makeText(this, "OBJ import failed: ${e.message}", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Model import failed: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -617,14 +628,10 @@ class MainActivity : Activity() {
         }
 
         private fun drawMarker(obj: SceneObject) {
-            val lines = ArrayList<Float>()
-            val s = if (obj.type == "Light") 0.45f else 0.35f
-            addLine(lines, -s, 0f, 0f, s, 0f, 0f, if (obj.type == "Light") 1f else 0.95f, 0.75f, 0.2f)
-            addLine(lines, 0f, -s, 0f, 0f, s, 0f, if (obj.type == "Light") 1f else 0.95f, 0.75f, 0.2f)
-            addLine(lines, 0f, 0f, -s, 0f, 0f, s, if (obj.type == "Light") 1f else 0.95f, 0.75f, 0.2f)
+            // Shared immutable geometry avoids a fresh Java list, FloatBuffer and GPU upload each frame.
             Matrix.setIdentityM(model, 0)
             Matrix.translateM(model, 0, obj.x, obj.y + 0.7f, obj.z)
-            drawBuffer(floatBuffer(lines.toFloatArray()), lines.size / 6, GLES20.GL_LINES, model)
+            drawBuffer(markerBuffer, 6, GLES20.GL_LINES, model)
         }
 
         private fun getVbo(buffer: FloatBuffer): Int {
@@ -683,6 +690,146 @@ class MainActivity : Activity() {
 
         private fun floatBuffer(values: FloatArray): FloatBuffer =
             ByteBuffer.allocateDirect(values.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().apply { put(values); position(0) }
+    }
+
+ 
+    /**
+     * Geometry-focused glTF 2.0 importer. Supports GLB 2.0 and glTF JSON with embedded
+     * data-URI buffers; external .bin files, skins, morph targets and material textures
+     * are intentionally rejected instead of silently importing broken geometry.
+     */
+    private object GltfParser {
+        private const val GLB_MAGIC = 0x46546C67
+        private const val JSON_CHUNK = 0x4E4F534A
+        private const val BIN_CHUNK = 0x004E4942
+
+        fun isGltf(bytes: ByteArray): Boolean {
+            if (bytes.size >= 4 && ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).int == GLB_MAGIC) return true
+            return bytes.isNotEmpty() && bytes[0].toInt().toChar() == '{'
+        }
+
+        fun parse(bytes: ByteArray): Pair<FloatArray, Int> {
+            var jsonText: String
+            var binaryChunk: ByteArray? = null
+            if (bytes.size >= 12 && ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).int == GLB_MAGIC) {
+                val input = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+                require(input.int == GLB_MAGIC) { "Invalid GLB magic" }
+                require(input.int == 2) { "Only GLB version 2 is supported" }
+                val declaredLength = input.int
+                require(declaredLength <= bytes.size && declaredLength >= 12) { "Invalid GLB length" }
+                var json: ByteArray? = null
+                while (input.position() + 8 <= declaredLength) {
+                    val length = input.int
+                    val type = input.int
+                    require(length >= 0 && input.position().toLong() + length <= declaredLength.toLong()) { "Invalid GLB chunk" }
+                    val chunk = ByteArray(length)
+                    input.get(chunk)
+                    if (type == JSON_CHUNK) json = chunk
+                    if (type == BIN_CHUNK) binaryChunk = chunk
+                }
+                jsonText = String(json ?: error("GLB has no JSON chunk"), StandardCharsets.UTF_8).trimEnd('\u0000', ' ', '\n', '\r', '\t')
+            } else {
+                jsonText = String(bytes, StandardCharsets.UTF_8)
+            }
+            val root = JSONObject(jsonText)
+            val buffersJson = root.optJSONArray("buffers") ?: error("glTF has no buffers")
+            val buffers = ArrayList<ByteArray>()
+            for (i in 0 until buffersJson.length()) {
+                val item = buffersJson.getJSONObject(i)
+                val uri = item.optString("uri", "")
+                val data = when {
+                    uri.startsWith("data:") -> {
+                        val comma = uri.indexOf(',')
+                        require(comma >= 0 && uri.substring(0, comma).contains(";base64")) { "Only base64 embedded buffers are supported" }
+                        android.util.Base64.decode(uri.substring(comma + 1), android.util.Base64.DEFAULT)
+                    }
+                    uri.isEmpty() && i == 0 && binaryChunk != null -> binaryChunk!!
+                    else -> error("External glTF buffers are not supported yet; use GLB or embed the buffer as base64")
+                }
+                require(data.size >= item.optInt("byteLength", 0)) { "glTF buffer is shorter than declared byteLength" }
+                buffers.add(data)
+            }
+            val views = root.getJSONArray("bufferViews")
+            val accessors = root.getJSONArray("accessors")
+            val meshes = root.getJSONArray("meshes")
+            val output = ArrayList<Float>()
+            for (mi in 0 until meshes.length()) {
+                val primitives = meshes.getJSONObject(mi).getJSONArray("primitives")
+                for (pi in 0 until primitives.length()) {
+                    val primitive = primitives.getJSONObject(pi)
+                    require(primitive.optInt("mode", 4) == 4) { "Only TRIANGLES glTF primitives are supported" }
+                    val positionIndex = primitive.getJSONObject("attributes").optInt("POSITION", -1)
+                    require(positionIndex >= 0) { "Primitive has no POSITION attribute" }
+                    val positions = readFloatVec3(accessors, views, buffers, positionIndex)
+                    val indicesIndex = primitive.optInt("indices", -1)
+                    if (indicesIndex < 0) {
+                        require(positions.size % 9 == 0) { "Non-indexed primitive vertex count must form triangles" }
+                        output.addAll(positions.toList())
+                    } else {
+                        val indices = readIndices(accessors, views, buffers, indicesIndex)
+                        require(indices.size % 3 == 0) { "Index count must form triangles" }
+                        for (index in indices) {
+                            require(index >= 0 && index * 3 + 2 < positions.size) { "Index is outside the position accessor" }
+                            output.add(positions[index * 3]); output.add(positions[index * 3 + 1]); output.add(positions[index * 3 + 2])
+                        }
+                    }
+                }
+            }
+            require(output.isNotEmpty()) { "No triangle mesh geometry found" }
+            require(output.size % 9 == 0) { "Imported geometry is not a triangle list" }
+            val maxAbs = output.maxOf { kotlin.math.abs(it) }.coerceAtLeast(0.001f)
+            val normalized = output.map { it / maxAbs * 1.5f }.toFloatArray()
+            return Pair(normalized, normalized.size / 9)
+        }
+
+        private fun readFloatVec3(accessors: JSONArray, views: JSONArray, buffers: List<ByteArray>, index: Int): FloatArray {
+            val accessor = accessors.getJSONObject(index)
+            require(accessor.optInt("componentType") == 5126 && accessor.optString("type") == "VEC3") {
+                "POSITION accessor must use FLOAT VEC3"
+            }
+            val count = accessor.getInt("count")
+            val viewIndex = accessor.getInt("bufferView")
+            val view = views.getJSONObject(viewIndex)
+            val buffer = buffers[view.getInt("buffer")]
+            val stride = view.optInt("byteStride", 12)
+            require(stride >= 12) { "Invalid POSITION byteStride" }
+            val start = view.optInt("byteOffset", 0) + accessor.optInt("byteOffset", 0)
+            val out = FloatArray(count * 3)
+            val data = ByteBuffer.wrap(buffer).order(ByteOrder.LITTLE_ENDIAN)
+            for (i in 0 until count) {
+                val offset = start + i * stride
+                require(offset >= 0 && offset.toLong() + 12 <= buffer.size.toLong()) { "POSITION accessor exceeds buffer bounds" }
+                out[i * 3] = data.getFloat(offset)
+                out[i * 3 + 1] = data.getFloat(offset + 4)
+                out[i * 3 + 2] = data.getFloat(offset + 8)
+            }
+            return out
+        }
+
+        private fun readIndices(accessors: JSONArray, views: JSONArray, buffers: List<ByteArray>, index: Int): IntArray {
+            val accessor = accessors.getJSONObject(index)
+            require(accessor.optString("type") == "SCALAR") { "Index accessor must be SCALAR" }
+            val componentType = accessor.getInt("componentType")
+            val bytesPerIndex = when (componentType) { 5121 -> 1; 5123 -> 2; 5125 -> 4; else -> error("Unsupported index component type") }
+            val view = views.getJSONObject(accessor.getInt("bufferView"))
+            val buffer = buffers[view.getInt("buffer")]
+            val stride = view.optInt("byteStride", bytesPerIndex)
+            require(stride >= bytesPerIndex) { "Invalid index byteStride" }
+            val start = view.optInt("byteOffset", 0) + accessor.optInt("byteOffset", 0)
+            val data = ByteBuffer.wrap(buffer).order(ByteOrder.LITTLE_ENDIAN)
+            val out = IntArray(accessor.getInt("count"))
+            for (i in out.indices) {
+                val offset = start + i * stride
+                require(offset >= 0 && offset.toLong() + bytesPerIndex <= buffer.size.toLong()) { "Index accessor exceeds buffer bounds" }
+                out[i] = when (componentType) {
+                    5121 -> data.get(offset).toInt() and 0xff
+                    5123 -> data.getShort(offset).toInt() and 0xffff
+                    else -> data.getInt(offset)
+                }
+                require(out[i] >= 0) { "Unsigned index exceeds supported integer range" }
+            }
+            return out
+        }
     }
 
     private object ObjParser {
