@@ -37,22 +37,31 @@ jobs:
         with:
           gradle-version: "8.9"
 
+      - name: Locate Android SDK manager
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -path '*/bin/sdkmanager' | sort -V | tail -n 1)"
+          test -n "$SDKMANAGER"
+          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+          echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
+          "$SDKMANAGER" --version
+
       - name: Accept Android SDK licenses
         shell: bash
         run: |
-          command -v sdkmanager
-          yes | sdkmanager --licenses || true
+          yes | "$SDKMANAGER" --licenses || true
 
       - name: Install pinned Android toolchain
         shell: bash
         run: |
           set -euo pipefail
-          sdkmanager --install \
+          "$SDKMANAGER" --install \
             "platforms;android-35" \
             "build-tools;35.0.0" \
             "ndk;27.2.12479018" \
             "cmake;3.22.1"
-          sdkmanager --list_installed
+          "$SDKMANAGER" --list_installed
 
       - name: Verify toolchain
         shell: bash
