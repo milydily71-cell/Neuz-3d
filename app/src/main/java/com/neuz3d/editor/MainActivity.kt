@@ -413,6 +413,7 @@ class MainActivity : Activity() {
         private var sphereBuffer: FloatBuffer? = null
         private var sphereCount = 0
         private var axisBuffer: FloatBuffer? = null
+        private var markerBuffer: FloatBuffer? = null
         private var importedBuffer: FloatBuffer? = null
         private val vboCache = java.util.IdentityHashMap<FloatBuffer, Int>()
         private var gridCount = 0
@@ -479,6 +480,11 @@ class MainActivity : Activity() {
             addLine(axes, 0f, -0.006f, -20f, 0f, -0.006f, 20f, 0.20f, 0.45f, 1f)
             addLine(axes, 0f, 0f, 0f, 0f, 6f, 0f, 0.25f, 0.95f, 0.40f)
             axisBuffer = floatBuffer(axes.toFloatArray())
+            val marker = ArrayList<Float>()
+            addLine(marker, -0.45f, 0f, 0f, 0.45f, 0f, 0f, 1f, 0.72f, 0.20f)
+            addLine(marker, 0f, -0.45f, 0f, 0f, 0.45f, 0f, 1f, 0.72f, 0.20f)
+            addLine(marker, 0f, 0f, -0.45f, 0f, 0f, 0.45f, 1f, 0.72f, 0.20f)
+            markerBuffer = floatBuffer(marker.toFloatArray())
             val cube = ArrayList<Float>()
             val p = arrayOf(
                 floatArrayOf(-0.5f,-0.5f, 0.5f), floatArrayOf(0.5f,-0.5f, 0.5f),
