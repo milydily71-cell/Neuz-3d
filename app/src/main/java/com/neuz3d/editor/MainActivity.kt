@@ -530,7 +530,11 @@ class MainActivity : Activity() {
                 return true
             }
             MotionEvent.ACTION_UP -> {
-                if (!touchMoved && event.pointerCount == 1) viewport.queueEvent { renderer.pickAt(event.x, event.y) }
+                if (!touchMoved && event.pointerCount == 1) {
+                    val pickX = event.x
+                    val pickY = event.y
+                    viewport.queueEvent { renderer.pickAt(pickX, pickY) }
+                }
                 lastDistance = 0f
                 return true
             }
@@ -607,6 +611,7 @@ class MainActivity : Activity() {
         fun zoomBy(factor: Float) { distance = (distance * factor).coerceIn(2.5f, 35f) }
         fun resetCamera() { yaw = 35f; pitch = 24f; distance = 9f }
         fun pickAt(screenX: Float, screenY: Float) {
+            val viewModelPick = FloatArray(16)
             val mvpPick = FloatArray(16)
             val modelPick = FloatArray(16)
             val eye = FloatArray(4)
@@ -617,8 +622,8 @@ class MainActivity : Activity() {
                 if (obj.type == "Light" || obj.type == "Camera") continue
                 Matrix.setIdentityM(modelPick, 0)
                 Matrix.translateM(modelPick, 0, obj.x, obj.y + 0.5f, obj.z)
-                Matrix.multiplyMM(mvpPick, 0, view, 0, modelPick, 0)
-                Matrix.multiplyMM(mvpPick, 0, projection, 0, mvpPick, 0)
+                Matrix.multiplyMM(viewModelPick, 0, view, 0, modelPick, 0)
+                Matrix.multiplyMM(mvpPick, 0, projection, 0, viewModelPick, 0)
                 Matrix.multiplyMV(eye, 0, mvpPick, 0, clipPosition, 0)
                 if (eye[3] <= 0f) continue
                 val sx = (eye[0] / eye[3] * 0.5f + 0.5f) * width
