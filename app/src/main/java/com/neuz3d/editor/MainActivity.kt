@@ -405,6 +405,7 @@ class MainActivity : Activity() {
         private var sphereCount = 0
         private var axisBuffer: FloatBuffer? = null
         private var importedBuffer: FloatBuffer? = null
+        private val vboCache = java.util.IdentityHashMap<FloatBuffer, Int>()
         private var gridCount = 0
 
         fun setScene(newObjects: List<SceneObject>, selected: Int, newQuality: Int) {
@@ -425,6 +426,7 @@ class MainActivity : Activity() {
         }
 
         override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
+            vboCache.clear()
             GLES20.glClearColor(0.055f, 0.065f, 0.085f, 1f)
             GLES20.glEnable(GLES20.GL_DEPTH_TEST)
             GLES20.glDepthFunc(GLES20.GL_LEQUAL)
@@ -578,17 +580,34 @@ class MainActivity : Activity() {
             drawBuffer(floatBuffer(lines.toFloatArray()), lines.size / 6, GLES20.GL_LINES, model)
         }
 
+        private fun getVbo(buffer: FloatBuffer): Int {
+            val cached = vboCache[buffer]
+            if (cached != null) return cached
+            val ids = IntArray(1)
+            GLES20.glGenBuffers(1, ids, 0)
+            val id = ids[0]
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, id)
+            val upload = buffer.duplicate()
+            upload.position(0)
+            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, upload.capacity() * 4, upload, GLES20.GL_STATIC_DRAW)
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
+            vboCache[buffer] = id
+            return id
+        }
+
         private fun drawRawPositionBuffer(buf: FloatBuffer, count: Int) {
             if (count <= 0) return
             Matrix.multiplyMM(temp, 0, view, 0, model, 0)
             Matrix.multiplyMM(mvp, 0, projection, 0, temp, 0)
             GLES20.glUniformMatrix4fv(uMvp, 1, false, mvp, 0)
-            GLES20.glVertexAttribPointer(aPosition, 3, GLES20.GL_FLOAT, false, 0, buf)
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, getVbo(buf))
             GLES20.glEnableVertexAttribArray(aPosition)
+            GLES20.glVertexAttribPointer(aPosition, 3, GLES20.GL_FLOAT, false, 0, 0)
             GLES20.glDisableVertexAttribArray(aColor)
             GLES20.glVertexAttrib3f(aColor, 0.85f, 0.48f, 0.25f)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, min(count, buf.capacity() / 3))
             GLES20.glEnableVertexAttribArray(aColor)
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
         }
 
         private fun drawBuffer(buffer: FloatBuffer?, count: Int, mode: Int, modelMatrix: FloatArray) {
@@ -596,14 +615,13 @@ class MainActivity : Activity() {
             Matrix.multiplyMM(temp, 0, view, 0, modelMatrix, 0)
             Matrix.multiplyMM(mvp, 0, projection, 0, temp, 0)
             GLES20.glUniformMatrix4fv(uMvp, 1, false, mvp, 0)
-            buffer.position(0)
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, getVbo(buffer))
             GLES20.glEnableVertexAttribArray(aPosition)
             GLES20.glEnableVertexAttribArray(aColor)
-            GLES20.glVertexAttribPointer(aPosition, 3, GLES20.GL_FLOAT, false, 24, buffer)
-            buffer.position(3)
-            GLES20.glVertexAttribPointer(aColor, 3, GLES20.GL_FLOAT, false, 24, buffer)
+            GLES20.glVertexAttribPointer(aPosition, 3, GLES20.GL_FLOAT, false, 24, 0)
+            GLES20.glVertexAttribPointer(aColor, 3, GLES20.GL_FLOAT, false, 24, 12)
             GLES20.glDrawArrays(mode, 0, count)
-            buffer.position(0)
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
         }
 
         private fun compile(type: Int, source: String): Int {
