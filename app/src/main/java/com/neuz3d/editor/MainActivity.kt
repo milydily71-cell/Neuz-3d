@@ -15,12 +15,14 @@ import android.view.ViewGroup
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
+import org.json.JSONArray
 import org.json.JSONObject
 import java.nio.charset.StandardCharsets
 import java.util.Locale
@@ -59,6 +61,31 @@ class MainActivity : Activity() {
     private var quality = 1
     private var rendererMode = 0
 
+    private val materialPresets = listOf(
+        MaterialPreset("Plastic", 0.05f, 0.65f, floatArrayOf(0.5f, 0.5f, 0.55f)),
+        MaterialPreset("Metal", 0.95f, 0.2f, floatArrayOf(0.75f, 0.75f, 0.78f)),
+        MaterialPreset("Gold", 0.95f, 0.25f, floatArrayOf(1f, 0.78f, 0.35f)),
+        MaterialPreset("Copper", 0.9f, 0.35f, floatArrayOf(0.95f, 0.6f, 0.45f)),
+        MaterialPreset("Glass", 0.0f, 0.05f, floatArrayOf(0.8f, 0.9f, 1f)),
+        MaterialPreset("Wood", 0.0f, 0.85f, floatArrayOf(0.55f, 0.35f, 0.18f)),
+        MaterialPreset("Stone", 0.02f, 0.9f, floatArrayOf(0.6f, 0.58f, 0.55f)),
+        MaterialPreset("Rubber", 0.0f, 0.98f, floatArrayOf(0.15f, 0.15f, 0.15f)),
+        MaterialPreset("Skin", 0.02f, 0.55f, floatArrayOf(0.9f, 0.7f, 0.6f)),
+        MaterialPreset("Emissive", 0.0f, 0.4f, floatArrayOf(0.2f, 0.8f, 0.4f), 1.5f)
+    )
+
+    private val texturePresets = listOf(
+        TexturePreset("Solid", 0),
+        TexturePreset("Checker", 1),
+        TexturePreset("Grid", 2),
+        TexturePreset("Brick", 3),
+        TexturePreset("Noise", 4)
+    )
+
+    private lateinit var timelineSeekBar: SeekBar
+    private lateinit var timelineLabel: TextView
+    private lateinit var outlinerText: TextView
+
     private val prefs by lazy { getSharedPreferences("neuz3d_scene", MODE_PRIVATE) }
 
     data class KeyframeData(
@@ -66,6 +93,13 @@ class MainActivity : Activity() {
         val lights: List<SceneLight>,
         val bones: List<Bone>
     )
+
+    data class MaterialPreset(
+        val name: String, val metallic: Float, val roughness: Float,
+        val color: FloatArray, val emissive: Float = 0f
+    )
+
+    data class TexturePreset(val name: String, val pattern: Int)
 
     private val primitiveLabels = mapOf(
         "+ Cube" to "Cube", "+ Sphere" to "Sphere", "+ Cylinder" to "Cylinder",
@@ -209,6 +243,12 @@ class MainActivity : Activity() {
                     val floatStr = if (hasFloat) "float-buffer" else "no float-buffer"
                     status.text = "GPU: $rendererName • ${if (is32) "ES 3.2" else "ES 3.x"} • $floatStr"
                 }
+            },
+            onPick = { pickedId ->
+                runOnUiThread {
+                    selectedId = pickedId
+                    syncSceneToRenderer()
+                }
             }
         )
         viewport.setRenderer(renderer)
@@ -232,6 +272,8 @@ class MainActivity : Activity() {
         actionRow.addView(toolButton("Undo") { undo() })
         actionRow.addView(toolButton("Redo") { redo() })
         actionRow.addView(toolButton("Material") { showMaterialEditor() })
+        actionRow.addView(toolButton("Presets") { showMaterialPresetPicker() })
+        actionRow.addView(toolButton("Texture") { showTexturePicker() })
         actionRow.addView(toolButton("Lighting") { showLightingEditor() })
         actionRow.addView(toolButton("Camera") { showCameraEditor() })
         actionRow.addView(toolButton("Vertex Paint") { showVertexPaintEditor() })
@@ -250,6 +292,31 @@ class MainActivity : Activity() {
         timelineRow.addView(toolButton("Speed-") { adjustSpeed(-5) })
         timelineRow.addView(toolButton("Speed+") { adjustSpeed(5) })
         objectPanel.addView(timelineRow)
+
+        // Visual timeline strip
+        timelineLabel = TextView(this).apply {
+            text = "Frame 0 / 240"; setTextColor(Color.LTGRAY); textSize = 11f
+            setPadding(0, dp(4), 0, dp(2))
+        }
+        objectPanel.addView(timelineLabel)
+        timelineSeekBar = SeekBar(this).apply {
+            setMax(240); setProgress(0)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                    if (fromUser) { currentFrame = p; applyTimelineFrame(p); updateTimelineLabel() }
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+        objectPanel.addView(timelineSeekBar)
+
+        // Scene outliner
+        outlinerText = TextView(this).apply {
+            setTextColor(Color.rgb(200, 200, 210)); textSize = 11f
+            setPadding(0, dp(4), 0, dp(2))
+        }
+        objectPanel.addView(outlinerText)
         root.addView(objectPanel)
 
         // Bottom bar
@@ -261,6 +328,7 @@ class MainActivity : Activity() {
         val bottomTools = horizontalStrip()
         bottomTools.addView(toolButton("Save Scene") { saveScene() })
         bottomTools.addView(toolButton("Load Scene") { loadScene() })
+        bottomTools.addView(toolButton("Projects") { showProjectManager() })
         bottomTools.addView(toolButton("Export JSON") { exportScene() })
         bottomTools.addView(toolButton("Import OBJ") { pickModel("obj") })
         bottomTools.addView(toolButton("Import glTF") { pickModel("gltf") })
@@ -623,6 +691,236 @@ class MainActivity : Activity() {
             .show()
     }
 
+    // --- Material preset picker ---
+    private fun showMaterialPresetPicker() {
+        val obj = scene.firstOrNull { it.id == selectedId } ?: run {
+            Toast.makeText(this, "Select an object first.", Toast.LENGTH_SHORT).show(); return
+        }
+        val labels = materialPresets.map { it.name }.toTypedArray()
+        AlertDialog.Builder(this).setTitle("Material Presets — ${obj.name}")
+            .setItems(labels) { _, which ->
+                val preset = materialPresets[which]
+                checkpoint()
+                obj.metallic = preset.metallic
+                obj.roughness = preset.roughness
+                obj.color = preset.color.copyOf()
+                obj.emissive = preset.emissive
+                syncSceneToRenderer()
+                Toast.makeText(this, "Applied ${preset.name} to ${obj.name}", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    // --- Texture picker ---
+    private var selectedTexturePattern = 0
+    private fun showTexturePicker() {
+        val obj = scene.firstOrNull { it.id == selectedId } ?: run {
+            Toast.makeText(this, "Select an object first.", Toast.LENGTH_SHORT).show(); return
+        }
+        val labels = texturePresets.map { it.name }.toTypedArray()
+        AlertDialog.Builder(this).setTitle("Texture Pattern — ${obj.name}")
+            .setItems(labels) { _, which ->
+                selectedTexturePattern = texturePresets[which].pattern
+                applyTexturePattern(obj, texturePresets[which])
+                Toast.makeText(this, "Applied ${texturePresets[which].name} texture", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun applyTexturePattern(obj: SceneObject, tex: TexturePreset) {
+        val meshData = MeshBuilder.build(obj.type)
+        val vertCount = meshData.vertices.size / 3
+        val colors = FloatArray(vertCount * 3)
+        val baseR = obj.color[0]; val baseG = obj.color[1]; val baseB = obj.color[2]
+        when (tex.pattern) {
+            0 -> { for (i in 0 until vertCount) { colors[i*3] = baseR; colors[i*3+1] = baseG; colors[i*3+2] = baseB } }
+            1 -> { for (i in 0 until vertCount) {
+                val x = meshData.vertices[i*3]; val y = meshData.vertices[i*3+1]
+                val checker = ((Math.floor(x.toDouble()*4) + Math.floor(y.toDouble()*4)).toInt() % 2 == 0)
+                if (checker) { colors[i*3] = baseR; colors[i*3+1] = baseG; colors[i*3+2] = baseB }
+                else { colors[i*3] = baseR*0.4f; colors[i*3+1] = baseG*0.4f; colors[i*3+2] = baseB*0.4f }
+            } }
+            2 -> { for (i in 0 until vertCount) {
+                val x = meshData.vertices[i*3]; val z = meshData.vertices[i*3+2]
+                val onLine = Math.abs(x*5 - Math.round(x*5).toFloat()) < 0.15f || Math.abs(z*5 - Math.round(z*5).toFloat()) < 0.15f
+                if (onLine) { colors[i*3] = 0.8f; colors[i*3+1] = 0.8f; colors[i*3+2] = 0.8f }
+                else { colors[i*3] = baseR*0.5f; colors[i*3+1] = baseG*0.5f; colors[i*3+2] = baseB*0.5f }
+            } }
+            3 -> { for (i in 0 until vertCount) {
+                val x = meshData.vertices[i*3]; val y = meshData.vertices[i*3+1]
+                val bx = (x*3).toInt(); val by = (y*3).toInt()
+                val offset = if (by % 2 == 0) 0 else 1
+                val inBrick = Math.abs(x*3 - bx.toFloat() - offset*0.5f) < 0.85f && Math.abs(y*3 - by.toFloat()) < 0.85f
+                if (inBrick) { colors[i*3] = 0.65f; colors[i*3+1] = 0.35f; colors[i*3+2] = 0.2f }
+                else { colors[i*3] = 0.3f; colors[i*3+1] = 0.3f; colors[i*3+2] = 0.3f }
+            } }
+            4 -> { val rnd = java.util.Random(obj.id.toLong())
+                for (i in 0 until vertCount) {
+                    val n = rnd.nextFloat()
+                    colors[i*3] = baseR * (0.5f + n * 0.5f)
+                    colors[i*3+1] = baseG * (0.5f + n * 0.5f)
+                    colors[i*3+2] = baseB * (0.5f + n * 0.5f)
+                }
+            }
+        }
+        obj.vertexColors = colors
+        syncSceneToRenderer()
+    }
+
+    // --- Project manager (named save slots) ---
+    private fun showProjectManager() {
+        val projectList = getProjectList()
+        val dialogView = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(16), dp(20), dp(16))
+        }
+        dialogView.addView(TextView(this).apply {
+            text = "Saved Projects:"; setTextColor(Color.WHITE); textSize = 14f; setPadding(0, 0, 0, dp(8))
+        })
+        if (projectList.isEmpty()) {
+            dialogView.addView(TextView(this).apply {
+                text = "No saved projects yet.\nSave the current scene with a name below."
+                setTextColor(Color.LTGRAY); textSize = 12f
+            })
+        } else {
+            for (proj in projectList) {
+                val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(3), 0, dp(3)) }
+                row.addView(TextView(this).apply {
+                    text = "  ${proj.name}  (${proj.objectCount} objects, ${proj.keyframeCount} keys)"
+                    setTextColor(Color.rgb(200, 200, 210)); textSize = 12f
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                })
+                row.addView(toolButton("Load") { loadProject(proj.name) })
+                row.addView(toolButton("Delete") { deleteProject(proj.name) })
+                dialogView.addView(row)
+            }
+        }
+        val nameInput = EditText(this).apply {
+            hint = "Project name..."; setHintTextColor(Color.GRAY); setTextColor(Color.WHITE)
+            setSingleLine(true)
+        }
+        dialogView.addView(nameInput)
+        val saveBtn = Button(this).apply {
+            text = "Save Current Scene as Project"; textSize = 11f; isAllCaps = false
+            setOnClickListener {
+                val name = nameInput.text.toString().trim()
+                if (name.isEmpty()) {
+                    Toast.makeText(this@MainActivity, "Enter a project name.", Toast.LENGTH_SHORT).show()
+                } else {
+                    saveProject(name)
+                }
+            }
+        }
+        dialogView.addView(saveBtn)
+        val scroll = ScrollView(this).apply { addView(dialogView) }
+        AlertDialog.Builder(this).setTitle("Project Manager")
+            .setView(scroll)
+            .setPositiveButton("Done", null)
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private data class ProjectInfo(val name: String, val objectCount: Int, val keyframeCount: Int)
+
+    private fun getProjectList(): List<ProjectInfo> {
+        val raw = prefs.getString("project_index", "[]") ?: "[]"
+        val names = JSONArray(raw)
+        val list = ArrayList<ProjectInfo>()
+        for (i in 0 until names.length()) {
+            val name = names.optString(i)
+            val data = prefs.getString("project:$name", null) ?: continue
+            try {
+                val json = JSONObject(data)
+                val objCount = json.optJSONArray("objects")?.length() ?: 0
+                val kfRaw = json.optString("keyframes", "{}")
+                val kfCount = JSONObject(kfRaw).length()
+                list.add(ProjectInfo(name, objCount, kfCount))
+            } catch (e: Exception) { list.add(ProjectInfo(name, 0, 0)) }
+        }
+        return list
+    }
+
+    private fun saveProject(name: String) {
+        val data = JSONObject()
+            .put("scene", JSONObject(sceneJson()))
+            .put("keyframes", keyframesJson())
+            .put("savedAt", System.currentTimeMillis())
+            .toString()
+        prefs.edit().putString("project:$name", data).apply()
+        val raw = prefs.getString("project_index", "[]") ?: "[]"
+        val names = JSONArray(raw)
+        val nameList = ArrayList<String>()
+        for (i in 0 until names.length()) {
+            val n = names.optString(i)
+            if (n != name) nameList.add(n)
+        }
+        nameList.add(name)
+        prefs.edit().putString("project_index", JSONArray(nameList).toString()).apply()
+        Toast.makeText(this, "Project '$name' saved.", Toast.LENGTH_SHORT).show()
+        showProjectManager()
+    }
+
+    private fun loadProject(name: String) {
+        val data = prefs.getString("project:$name", null) ?: run {
+            Toast.makeText(this, "Project not found.", Toast.LENGTH_SHORT).show(); return
+        }
+        try {
+            val json = JSONObject(data)
+            restoreSceneJson(json.getString("scene"))
+            restoreKeyframes(json.optString("keyframes", null))
+            currentFrame = 0; updateTimelineLabel()
+            Toast.makeText(this, "Project '$name' loaded.", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Toast.makeText(this, "Load failed: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun deleteProject(name: String) {
+        prefs.edit().remove("project:$name").apply()
+        val raw = prefs.getString("project_index", "[]") ?: "[]"
+        val names = JSONArray(raw)
+        val nameList = ArrayList<String>()
+        for (i in 0 until names.length()) {
+            val n = names.optString(i)
+            if (n != name) nameList.add(n)
+        }
+        prefs.edit().putString("project_index", JSONArray(nameList).toString()).apply()
+        Toast.makeText(this, "Project '$name' deleted.", Toast.LENGTH_SHORT).show()
+        showProjectManager()
+    }
+
+    // --- Timeline label & outliner update ---
+    private fun updateTimelineLabel() {
+        val keyFrames = if (keyframes.isEmpty()) "" else
+            keyframes.keys.joinToString(",") { it.toString() }
+        timelineLabel.text = "Frame $currentFrame / 240  •  ${keyframes.size} keyframes  •  keys: $keyFrames"
+        if (::timelineSeekBar.isInitialized) timelineSeekBar.setProgress(currentFrame)
+    }
+
+    private fun updateOutliner() {
+        if (!::outlinerText.isInitialized) return
+        val sb = StringBuilder()
+        scene.forEachIndexed { idx, obj ->
+            val marker = if (obj.id == selectedId) "▶" else " "
+            val vis = if (obj.visible) "" else " [hidden]"
+            sb.append("$marker ${idx + 1}. ${obj.name} ($obj.type)$vis\n")
+        }
+        if (lights.isNotEmpty()) {
+            sb.append("\nLights: ${lights.size}\n")
+            lights.forEach { l -> sb.append("  • ${l.name} ($l.type) ${if (l.enabled) "on" else "off"}\n") }
+        }
+        if (cameras.isNotEmpty()) {
+            sb.append("\nCameras: ${cameras.size}\n")
+            cameras.forEach { c -> sb.append("  • ${c.name}${if (c.active) " (active)" else ""}\n") }
+        }
+        if (skeletons.isNotEmpty()) {
+            sb.append("\nSkeletons: ${skeletons.size}\n")
+            skeletons.forEach { s -> sb.append("  • ${s.name} (${s.bones.size} bones)\n") }
+        }
+        outlinerText.text = sb.toString().trim()
+    }
+
     // --- Slider helper ---
     private fun addSliderRow(
         parent: LinearLayout, label: String, current: Float, min: Float, max: Float, onChange: (Float) -> Unit
@@ -633,7 +931,7 @@ class MainActivity : Activity() {
         val range = ((max - min) * 100).toInt().coerceAtLeast(1)
         val progress = ((current - min) * 100).toInt().coerceIn(0, range)
         val bar = SeekBar(this).apply {
-            max = range; this.progress = progress
+            setMax(range); setProgress(progress)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
                     val val_ = min + p / 100f
@@ -662,7 +960,8 @@ class MainActivity : Activity() {
     private fun clearKeyframes() {
         if (keyframes.isEmpty()) { Toast.makeText(this, "No keyframes to clear.", Toast.LENGTH_SHORT).show(); return }
         keyframes.clear(); prefs.edit().remove("timeline_keyframes").apply()
-        status.text = "Timeline cleared"; Toast.makeText(this, "All keyframes cleared.", Toast.LENGTH_SHORT).show()
+        status.text = "Timeline cleared"; updateTimelineLabel()
+        Toast.makeText(this, "All keyframes cleared.", Toast.LENGTH_SHORT).show()
     }
 
     // --- UI builders ---
@@ -802,6 +1101,8 @@ class MainActivity : Activity() {
         objectLabel.text = "Hierarchy • " + visible.joinToString("   ") {
             if (it.id == selectedId) "▶ ${it.name}" else it.name
         }
+        if (::timelineLabel.isInitialized) updateTimelineLabel()
+        if (::outlinerText.isInitialized) updateOutliner()
     }
 
     // --- Scene serialization ---
@@ -846,6 +1147,7 @@ class MainActivity : Activity() {
         keyframes[currentFrame] = KeyframeData(scene.map { it.copy() }, lights.map { it }, currentBones)
         prefs.edit().putString("timeline_keyframes", keyframesJson()).apply()
         status.text = "Timeline • frame $currentFrame • ${keyframes.size} keyframe(s)"
+        updateTimelineLabel()
         Toast.makeText(this, "Keyframe stored at frame $currentFrame.", Toast.LENGTH_SHORT).show()
     }
 
@@ -853,6 +1155,7 @@ class MainActivity : Activity() {
         currentFrame = (currentFrame + delta).coerceIn(0, 240)
         applyTimelineFrame(currentFrame)
         status.text = "Timeline • frame $currentFrame / 240 • ${keyframes.size} keyframe(s)"
+        updateTimelineLabel()
     }
 
     private val timelineTick = object : Runnable {
@@ -863,6 +1166,7 @@ class MainActivity : Activity() {
             currentFrame = if (currentFrame >= last) first else currentFrame + 1
             applyTimelineFrame(currentFrame)
             status.text = "Playing • frame $currentFrame / $last • $playbackFps fps"
+            updateTimelineLabel()
             timelineHandler.postDelayed(this, (1000L / playbackFps))
         }
     }
