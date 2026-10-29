@@ -1,6 +1,6 @@
 # Neuz 3D — Product Roadmap
 
-**Vision:** a mobile-first Android 3D studio for modeling, animation, rendering, and 3D movie-making.
+**Vision:** a mobile-first Android 3D studio for modeling, animation, rendering, and 3D movie-making, inspired by tools like Prisma3D.
 
 Status legend: ✅ implemented in source · 🚧 in progress or scaffolded · ⬜ planned
 
@@ -9,10 +9,13 @@ Status legend: ✅ implemented in source · 🚧 in progress or scaffolded · �
 | Item | Status | Notes |
 |---|---|---|
 | Orbit / pinch camera and tap selection | ✅ | One-finger orbit, pinch zoom, screen-space picking |
-| Transform gizmos and Select/Move/Rotate/Scale tools | ✅ | Axis gizmo and tool state model |
-| Cube, sphere, light, and camera primitives | ✅ | Sphere generated from triangle geometry |
+| Transform controls: Move/Rotate/Scale on all 3 axes | ✅ | X/Y/Z translate, Y/X/Z rotate, scale, reset |
+| 3D primitives: Cube, Sphere, Cylinder, Cone, Torus, Plane, Pyramid, Capsule, IcoSphere | ✅ | Wireframe and solid modes for each |
+| Duplicate, visibility toggle, wireframe toggle, grid snap | ✅ | Per-object controls |
+| Per-object PBR material editor (metallic, roughness, base color) | ✅ | Live slider editor with RGB color |
+| Selection highlight with rim lighting | ✅ | Selected object gets visual highlight |
 | Extrude, subdivide, loop cut, bevel, paint | 🚧 | Modeling operations still in progress |
-| Snapping and multi-selection | 🚧 / ⬜ | Increment snapping scaffolded; multi-select planned |
+| Snapping and multi-selection | 🚧 / ⬜ | Grid snap scaffolded; multi-select planned |
 
 ## 2. Import & Materials
 
@@ -29,8 +32,10 @@ Status legend: ✅ implemented in source · 🚧 in progress or scaffolded · �
 
 | Item | Status | Notes |
 |---|---|---|
-| Transform keyframes and timeline playback | ✅ | Local persistence |
-| Interpolation and easing model | 🚧 | Curve editor and advanced controls planned |
+| Transform keyframes and timeline playback | ✅ | Local persistence, 240-frame range |
+| Ease-in-out cubic interpolation | ✅ | Smoothed playback between keyframes |
+| Adjustable playback speed (5–60 fps) | ✅ | Speed control in timeline UI |
+| 3-axis rotation keyframe interpolation | ✅ | RotX, RotY, RotZ interpolated |
 | Named animation clips and property tracks | 🚧 | Core data model in place |
 | Graph editor, skeletal animation, ragdoll | ⬜ | Future milestones |
 
@@ -38,11 +43,13 @@ Status legend: ✅ implemented in source · 🚧 in progress or scaffolded · �
 
 | Item | Status | Notes |
 |---|---|---|
-| Android OpenGL ES viewport and PBR shader | ✅ | Current renderer is GLES |
+| Android OpenGL ES viewport with PBR Cook-Torrance shader | ✅ | GGX + Smith + Fresnel + tonemapping |
+| GLES 3.2 runtime capability detection | ✅ | Checks GLES32.GL_VERSION at runtime |
 | Low / Balanced / High quality profiles | 🚧 | Not all advanced GPU settings are wired |
 | Image-based lighting, real shadows, reflections | ⬜ | Needs environment/offscreen rendering passes |
 | Frame-sequence export | 🚧 | Export path requires completion and verification |
 | MP4 movie export | ⬜ | Planned via Android MediaCodec |
+| Vulkan 1.1/1.2/1.3 capability detection | ✅ | Instance + device + queue + memory probe |
 | Vulkan rendering backend | ⬜ | Device probing only; not a Vulkan renderer |
 
 ## 5. Movie Studio
@@ -60,13 +67,14 @@ Status legend: ✅ implemented in source · 🚧 in progress or scaffolded · �
 |---|---|---|
 | Theme colors, dimensions, styles | ✅ | Android resources |
 | Editor HUD, toolbar, properties, timeline layouts | ✅ | UI layout foundation |
+| Material editor dialog with live sliders | ✅ | Metallic/roughness/RGB seekbars |
 | Render/export HUD and shot-list widgets | 🚧 | Requires end-to-end wiring and device verification |
 
 ## Milestones
 
-- **M1 — Editor core:** scene objects, camera, selection, undo, and save/load.
+- **M1 — Editor core:** scene objects, camera, selection, undo, save/load, 9 primitives, per-object materials.
 - **M2 — Content import:** OBJ and basic glTF/GLB geometry with material factors.
-- **M3 — Animation:** clips, easing, timeline, and keyframing.
+- **M3 — Animation:** clips, easing, timeline, keyframing, adjustable speed, 3-axis rotation.
 - **M4 — Modeling:** mesh buffers, editing operations, and modifiers.
 - **M5 — Render/export:** IBL, shadows, frame export, and MP4.
 - **M6 — Movie maker:** shots, storyboard, camera cuts, and audio.
