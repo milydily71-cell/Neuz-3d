@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Blender-like dark theme color palette -->
+    <color name="neuz_bg_primary">#FF1A1A22</color>
+    <color name="neuz_bg_secondary">#FF252830</color>
+    <color name="neuz_bg_surface">#FF2D3038</color>
+    <color name="neuz_bg_overlay">#FF33373F</color>
+    <color name="neuz_bg_viewport">#FF0E0F14</color>
+
+    <color name="neuz_text_primary">#FFEEEEEE</color>
+    <color name="neuz_text_secondary">#FFA0A0A8</color>
+    <color name="neuz_text_hint">#FF606068</color>
+
+    <color name="neuz_accent_blue">#FF4772B3</color>
+    <color name="neuz_accent_cyan">#FF4D88B3</color>
+    <color name="neuz_accent_orange">#FFE8863A</color>
+    <color name="neuz_accent_green">#FF6BB07A</color>
+    <color name="neuz_accent_red">#FFD05050</color>
+    <color name="neuz_accent_yellow">#FFC4A732</color>
+
+    <color name="neuz_tool_add">#FF5B8C5A</color>
+    <color name="neuz_tool_edit">#FF4772B3</color>
+    <color name="neuz_tool_delete">#FFB04040</color>
+    <color name="neuz_tool_animate">#FFC4A732</color>
+    <color name="neuz_tool_render">#FF8B5CB8</color>
+
+    <color name="neuz_axis_x">#FFCC3838</color>
+    <color name="neuz_axis_y">#FF6BB07A</color>
+    <color name="neuz_axis_z">#FF4772B3</color>
+
+    <color name="neuz_grid_major">#FF3A3A44</color>
+    <color name="neuz_grid_minor">#FF222228</color>
+    <color name="neuz_grid_axis">#FF555555</color>
+
+    <color name="neuz_selection">#FFE8A840</color>
+    <color name="neuz_active_object">#FFE8A840</color>
+    <color name="neuz_keyframe">#FFE8C040</color>
+
+    <color name="neuz_divider">#FF1A1A20</color>
+    <color name="neuz_panel_border">#FF3A3A42</color>
+
+    <color name="neuz_button_normal">#FF3A3D45</color>
+    <color name="neuz_button_pressed">#FF4A4D55</color>
+    <color name="neuz_button_active">#FF4772B3</color>
+    <color name="neuz_button_text">#FFCCCCCC</color>
+</resources>

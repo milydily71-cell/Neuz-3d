@@ -49,44 +49,53 @@ std::string detectVulkan() {
         return msg;
     }
 
+    auto enumPhysDevices = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(
+        dlsym(loader, "vkEnumeratePhysicalDevices"));
+    auto getPhysDevProps = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(
+        dlsym(loader, "vkGetPhysicalDeviceProperties"));
+    auto getPhysDevQueueFamilyProps = reinterpret_cast<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(
+        dlsym(loader, "vkGetPhysicalDeviceQueueFamilyProperties"));
+    auto getPhysDevMemProps = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
+        dlsym(loader, "vkGetPhysicalDeviceMemoryProperties"));
+
     uint32_t count = 0;
-    VkResult result = vkEnumeratePhysicalDevices(instance, &count, nullptr);
+    VkResult result = enumPhysDevices ? enumPhysDevices(instance, &count, nullptr) : VK_ERROR_INITIALIZATION_FAILED;
     std::vector<VkPhysicalDevice> devices;
     std::string answer;
-    if (result == VK_SUCCESS && count > 0) {
+    if (result == VK_SUCCESS && count > 0 && enumPhysDevices && getPhysDevProps) {
         devices.resize(count);
-        result = vkEnumeratePhysicalDevices(instance, &count, devices.data());
+        result = enumPhysDevices(instance, &count, devices.data());
         if (result == VK_SUCCESS && count > 0) {
             VkPhysicalDeviceProperties props{};
-            vkGetPhysicalDeviceProperties(devices.front(), &props);
+            getPhysDevProps(devices.front(), &props);
 
             answer = "Vulkan device: ";
             answer += props.deviceName;
             answer += " (device API " + apiVersionToString(props.apiVersion) + ", driver " +
                       apiVersionToString(props.driverVersion) + ")";
 
-            VkPhysicalDeviceFeatures2 features2{};
-            features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-            vkGetPhysicalDeviceFeatures2(devices.front(), &features2);
-
             answer += " | Instance API " + apiVersionToString(maxApiVersion);
             answer += " | v1.1 " + std::string(supportsV1_1 ? "yes" : "no");
             answer += " | v1.2 " + std::string(supportsV1_2 ? "yes" : "no");
             answer += " | v1.3 " + std::string(supportsV1_3 ? "yes" : "no");
 
-            uint32_t qfpCount = 0;
-            vkGetPhysicalDeviceQueueFamilyProperties(devices.front(), &qfpCount, nullptr);
-            std::vector<VkQueueFamilyProperties> qfp(qfpCount);
-            vkGetPhysicalDeviceQueueFamilyProperties(devices.front(), &qfpCount, qfp.data());
-            bool hasGraphics = false;
-            for (const auto& q : qfp) {
-                if (q.queueFlags & VK_QUEUE_GRAPHICS_BIT) { hasGraphics = true; break; }
+            if (getPhysDevQueueFamilyProps) {
+                uint32_t qfpCount = 0;
+                getPhysDevQueueFamilyProps(devices.front(), &qfpCount, nullptr);
+                std::vector<VkQueueFamilyProperties> qfp(qfpCount);
+                getPhysDevQueueFamilyProps(devices.front(), &qfpCount, qfp.data());
+                bool hasGraphics = false;
+                for (const auto& q : qfp) {
+                    if (q.queueFlags & VK_QUEUE_GRAPHICS_BIT) { hasGraphics = true; break; }
+                }
+                answer += " | graphics queue: " + std::string(hasGraphics ? "yes" : "no");
             }
-            answer += " | graphics queue: " + std::string(hasGraphics ? "yes" : "no");
 
-            VkPhysicalDeviceMemoryProperties memProps{};
-            vkGetPhysicalDeviceMemoryProperties(devices.front(), &memProps);
-            answer += " | memory heaps: " + std::to_string(memProps.memoryHeapCount);
+            if (getPhysDevMemProps) {
+                VkPhysicalDeviceMemoryProperties memProps{};
+                getPhysDevMemProps(devices.front(), &memProps);
+                answer += " | memory heaps: " + std::to_string(memProps.memoryHeapCount);
+            }
         }
     }
     if (answer.empty()) {

@@ -1,7 +1,6 @@
 package com.neuz3d.editor
 
 import android.opengl.GLES20
-import android.opengl.GLES32
 import android.opengl.GLSurfaceView
 import android.opengl.Matrix
 import java.nio.FloatBuffer
@@ -9,7 +8,6 @@ import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.sqrt
 
 class SceneRenderer(
     private val onGpuInfo: (String, String, Boolean, Boolean) -> Unit,
@@ -18,9 +16,19 @@ class SceneRenderer(
 ) : GLSurfaceView.Renderer {
 
     @Volatile private var objects: List<SceneObject> = emptyList()
+    @Volatile private var lights: List<SceneLight> = emptyList()
+    @Volatile private var cameras: List<SceneCamera> = emptyList()
+    @Volatile private var skeletons: List<Skeleton> = emptyList()
+    @Volatile private var editorState: EditorState = EditorState()
     @Volatile private var selectedId: Int = 1
     @Volatile private var quality: Int = 1
+    @Volatile private var lightArray: FloatArray = FloatArray(LightingSystem.maxLightCount() * 8)
+    @Volatile private var lightCount: Int = 0
+    @Volatile private var boneMatrices: FloatArray = FloatArray(0)
+    @Volatile private var boneCount: Int = 0
+
     @Volatile private var importedPositions: FloatArray? = null
+    @Volatile private var importedNormals: FloatArray? = null
     @Volatile private var importedTriangles: Int = 0
     @Volatile private var importedBaseColor = floatArrayOf(1f, 1f, 1f)
     @Volatile private var importedMetallic = 0.05f
@@ -36,13 +44,21 @@ class SceneRenderer(
     private var program = 0
     private var lineProgram = 0
     private var aPosition = 0
-    private var aColor = 0
+    private var aNormal = 0
+    private var aVertexColor = 0
     private var uMvp = 0
-    private var uLight = 0
+    private var uModel = 0
+    private var uNormalMat = 0
     private var uMetallic = -1
     private var uRoughness = -1
     private var uBaseColor = -1
     private var uSelected = -1
+    private var uEmissive = -1
+    private var uLightArray = -1
+    private var uLightCount = -1
+    private var uHasVertexColors = -1
+    private var uBoneMatrices = -1
+    private var uBoneCount = -1
     private var line_aPosition = 0
     private var line_uMvp = 0
     private var line_uColor = 0
@@ -51,26 +67,60 @@ class SceneRenderer(
     private var yaw = 35f
     private var pitch = 24f
     private var camDistance = 9f
+    private var camFov = 48f
     private val projection = FloatArray(16)
     private val view = FloatArray(16)
     private val model = FloatArray(16)
     private val mvp = FloatArray(16)
     private val temp = FloatArray(16)
+    private val normalMat = FloatArray(16)
 
     private var gridBuffer: FloatBuffer? = null
     private var axisBuffer: FloatBuffer? = null
     private var markerBuffer: FloatBuffer? = null
     private var gizmoBuffer: FloatBuffer? = null
+    private var boneBuffer: FloatBuffer? = null
     private var importedBuffer: FloatBuffer? = null
+    private var importedNormBuffer: FloatBuffer? = null
     private val meshCache = HashMap<String, Pair<FloatBuffer, FloatBuffer>>()
     private val meshDataCache = HashMap<String, MeshData>()
     private val vboCache = java.util.IdentityHashMap<FloatBuffer, Int>()
     private var gridCount = 0
 
-    fun setScene(newObjects: List<SceneObject>, selected: Int, newQuality: Int) {
+    fun setScene(
+        newObjects: List<SceneObject>, selected: Int, newQuality: Int,
+        newLights: List<SceneLight> = emptyList(),
+        newCameras: List<SceneCamera> = emptyList(),
+        newSkeletons: List<Skeleton> = emptyList(),
+        newEditorState: EditorState = EditorState()
+    ) {
         objects = newObjects
         selectedId = selected
         quality = newQuality
+        lights = newLights
+        cameras = newCameras
+        skeletons = newSkeletons
+        editorState = newEditorState
+        if (newLights.isNotEmpty()) {
+            lightArray = LightingSystem.lightsToArray(newLights)
+            lightCount = min(newLights.size, LightingSystem.maxLightCount())
+        } else {
+            lightArray = LightingSystem.lightsToArray(listOf(
+                SceneLight(0, "Sun", "Directional", floatArrayOf(1f, 0.95f, 0.85f), 1.2f, 15f, 4f, 6f, 3f, false, true)
+            ))
+            lightCount = 1
+        }
+        if (newSkeletons.isNotEmpty()) {
+            val skel = newSkeletons.first()
+            val matrices = SkeletonSystem.computeBoneMatrices(skel)
+            boneMatrices = FloatArray(matrices.size * 16)
+            for (i in matrices.indices) {
+                System.arraycopy(matrices[i], 0, boneMatrices, i * 16, 16)
+            }
+            boneCount = matrices.size
+        } else {
+            boneCount = 0
+        }
     }
 
     fun orbit(dx: Float, dy: Float) {
@@ -79,7 +129,8 @@ class SceneRenderer(
     }
 
     fun zoomBy(factor: Float) { camDistance = (camDistance * factor).coerceIn(2.5f, 35f) }
-    fun resetCamera() { yaw = 35f; pitch = 24f; camDistance = 9f }
+    fun resetCamera() { yaw = 35f; pitch = 24f; camDistance = 9f; camFov = 48f }
+    fun setFov(fov: Float) { camFov = fov.coerceIn(20f, 100f) }
 
     fun pickAt(screenX: Float, screenY: Float) {
         val viewModelPick = FloatArray(16)
@@ -108,11 +159,13 @@ class SceneRenderer(
 
     fun setImportedMesh(mesh: ImportedMesh) {
         importedPositions = mesh.positions
+        importedNormals = mesh.normals
         importedTriangles = mesh.triangles
         importedBaseColor = mesh.baseColor.copyOf()
         importedMetallic = mesh.metallic
         importedRoughness = mesh.roughness
         importedBuffer = MeshBuilder.floatBuffer(mesh.positions)
+        importedNormBuffer = if (mesh.normals.isNotEmpty()) MeshBuilder.floatBuffer(mesh.normals) else null
     }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
@@ -127,28 +180,36 @@ class SceneRenderer(
         version = "$glVersionStr • GLSL $shading"
         val vendor = GLES20.glGetString(GLES20.GL_RENDERER) ?: "GPU"
 
-        val is32 = try { GLES32.glGetString(GLES32.GL_VERSION)?.contains("3.2") == true } catch (e: Exception) { false }
-        isGles32 = is32
-        glesMajorVersion = if (glVersionStr.contains("3.2")) 32
-            else if (glVersionStr.contains("3.1")) 31
-            else if (glVersionStr.contains("3.0")) 30
-            else 20
+        isGles32 = glVersionStr.contains("3.2", ignoreCase = true)
+        glesMajorVersion = when {
+            glVersionStr.contains("3.2") -> 32
+            glVersionStr.contains("3.1") -> 31
+            glVersionStr.contains("3.0") -> 30
+            else -> 20
+        }
 
         val extString = GLES20.glGetString(GLES20.GL_EXTENSIONS) ?: ""
-        val hasAstc = extString.contains("ASTC_texture", ignoreCase = true)
         val hasFloat = extString.contains("color_buffer_float", ignoreCase = true)
 
-        onGpuInfo(version, vendor, is32, hasFloat)
+        onGpuInfo(version, vendor, isGles32, hasFloat)
 
         val vs = compile(GLES20.GL_VERTEX_SHADER, """
             attribute vec3 aPosition;
+            attribute vec3 aNormal;
+            attribute vec3 aVertexColor;
             uniform mat4 uMvp;
+            uniform mat4 uModel;
+            uniform mat4 uNormalMat;
+            uniform vec3 uBaseColor;
+            uniform int uHasVertexColors;
             varying vec3 vNormal;
             varying vec3 vWorldPos;
+            varying vec3 vColor;
             void main() {
                 gl_Position = uMvp * vec4(aPosition, 1.0);
-                vNormal = normalize(aPosition);
-                vWorldPos = aPosition;
+                vNormal = normalize((uNormalMat * vec4(aNormal, 0.0)).xyz);
+                vWorldPos = (uModel * vec4(aPosition, 1.0)).xyz;
+                vColor = uHasVertexColors == 1 ? aVertexColor : uBaseColor;
             }
         """.trimIndent())
 
@@ -156,10 +217,16 @@ class SceneRenderer(
             precision highp float;
             varying vec3 vNormal;
             varying vec3 vWorldPos;
+            varying vec3 vColor;
             uniform float uMetallic;
             uniform float uRoughness;
-            uniform vec3 uBaseColor;
             uniform float uSelected;
+            uniform float uEmissive;
+            uniform int uLightCount;
+            uniform int uHasVertexColors;
+            #define MAX_LIGHTS 8
+            uniform vec4 uLights[MAX_LIGHTS]; // xyz=position, w=intensity
+            uniform vec3 uLightColors[MAX_LIGHTS];
             const float PI = 3.14159265359;
 
             vec3 fresnelSchlick(float c, vec3 F0) { return F0 + (1.0 - F0) * pow(clamp(1.0 - c, 0.0, 1.0), 5.0); }
@@ -173,23 +240,41 @@ class SceneRenderer(
 
             void main() {
                 vec3 N = normalize(vNormal);
-                vec3 V = vec3(0.0, 0.0, 1.0);
-                vec3 L = normalize(vec3(-0.45, 0.85, 0.55));
-                vec3 H = normalize(V + L);
+                vec3 V = normalize(-vWorldPos);
                 float m = clamp(uMetallic, 0.0, 1.0);
                 float r = clamp(uRoughness, 0.045, 1.0);
                 float nv = max(dot(N, V), 0.0);
-                float nl = max(dot(N, L), 0.0);
-                vec3 albedo = max(uBaseColor, vec3(0.0));
+                vec3 albedo = max(vColor, vec3(0.0));
                 vec3 F0 = mix(vec3(0.04), albedo, m);
-                vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
-                float D = D_GGX(N, H, r);
-                float G = G1(nv, r) * G1(nl, r);
-                vec3 spec = (D * G * F) / max(4.0 * nv * nl, 0.001);
-                vec3 kd = (vec3(1.0) - F) * (1.0 - m);
+
+                vec3 totalDiffuse = vec3(0.0);
+                vec3 totalSpecular = vec3(0.0);
+
+                for (int i = 0; i < MAX_LIGHTS; i++) {
+                    if (i >= uLightCount) break;
+                    vec3 lightPos = uLights[i].xyz;
+                    float intensity = uLights[i].w;
+                    vec3 toLight = lightPos - vWorldPos;
+                    float dist = length(toLight);
+                    vec3 L = toLight / max(dist, 0.001);
+                    vec3 lightCol = uLightColors[i] * intensity;
+                    float atten = 1.0 / (1.0 + dist * dist * 0.02);
+                    float nl = max(dot(N, L), 0.0);
+                    vec3 H = normalize(V + L);
+                    vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
+                    float D = D_GGX(N, H, r);
+                    float G = G1(nv, r) * G1(nl, r);
+                    vec3 spec = (D * G * F) / max(4.0 * nv * nl, 0.001);
+                    totalDiffuse += lightCol * nl * atten;
+                    totalSpecular += spec * lightCol * nl * atten;
+                }
+
+                vec3 kd = (vec3(1.0) - F0) * (1.0 - m);
                 float sky = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
                 vec3 env = mix(vec3(0.055, 0.065, 0.08), vec3(0.28, 0.38, 0.55), sky);
-                vec3 color = kd * albedo * env + (kd * albedo / PI + spec) * vec3(3.0, 2.85, 2.65) * nl + F * env * (1.0 - r * 0.7);
+                vec3 ambient = kd * albedo * env;
+                vec3 color = ambient + kd * albedo / PI * totalDiffuse + totalSpecular;
+                color += uEmissive * albedo;
                 if (uSelected > 0.5) {
                     float rim = 1.0 - clamp(dot(N, V), 0.0, 1.0);
                     color += vec3(0.15, 0.35, 0.6) * pow(rim, 2.0) * 0.5;
@@ -204,16 +289,26 @@ class SceneRenderer(
         GLES20.glAttachShader(program, vs)
         GLES20.glAttachShader(program, fs)
         GLES20.glBindAttribLocation(program, 0, "aPosition")
+        GLES20.glBindAttribLocation(program, 1, "aNormal")
+        GLES20.glBindAttribLocation(program, 2, "aVertexColor")
         GLES20.glLinkProgram(program)
         val linked = IntArray(1)
         GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, linked, 0)
         check(linked[0] == GLES20.GL_TRUE) { "Program link failed: " + GLES20.glGetProgramInfoLog(program) }
         aPosition = GLES20.glGetAttribLocation(program, "aPosition")
+        aNormal = GLES20.glGetAttribLocation(program, "aNormal")
+        aVertexColor = GLES20.glGetAttribLocation(program, "aVertexColor")
         uMvp = GLES20.glGetUniformLocation(program, "uMvp")
+        uModel = GLES20.glGetUniformLocation(program, "uModel")
+        uNormalMat = GLES20.glGetUniformLocation(program, "uNormalMat")
         uMetallic = GLES20.glGetUniformLocation(program, "uMetallic")
         uRoughness = GLES20.glGetUniformLocation(program, "uRoughness")
         uBaseColor = GLES20.glGetUniformLocation(program, "uBaseColor")
         uSelected = GLES20.glGetUniformLocation(program, "uSelected")
+        uEmissive = GLES20.glGetUniformLocation(program, "uEmissive")
+        uLightArray = GLES20.glGetUniformLocation(program, "uLights")
+        uLightCount = GLES20.glGetUniformLocation(program, "uLightCount")
+        uHasVertexColors = GLES20.glGetUniformLocation(program, "uHasVertexColors")
 
         val lineVs = compile(GLES20.GL_VERTEX_SHADER, """
             attribute vec3 aPosition;
@@ -244,7 +339,8 @@ class SceneRenderer(
         for (type in types) {
             val mesh = MeshBuilder.build(type)
             meshDataCache[type] = mesh
-            meshCache[type] = Pair(MeshBuilder.floatBuffer(mesh.vertices), MeshBuilder.floatBuffer(mesh.wireVertices))
+            val interleaved = mesh.interleavedPosNorm()
+            meshCache[type] = Pair(MeshBuilder.floatBuffer(interleaved), MeshBuilder.floatBuffer(mesh.wireVertices))
         }
     }
 
@@ -275,6 +371,11 @@ class SceneRenderer(
         addLine(gizmo, 0f, 0f, 0f, 0f, 1.35f, 0f, 0.25f, 1f, 0.35f)
         addLine(gizmo, 0f, 0f, 0f, 0f, 0f, 1.35f, 0.2f, 0.5f, 1f)
         gizmoBuffer = MeshBuilder.floatBuffer(gizmo.toFloatArray())
+
+        val bones = ArrayList<Float>()
+        addLine(bones, 0f, 0f, 0f, 0f, 0.5f, 0f, 0.8f, 0.6f, 0.2f)
+        addLine(bones, 0f, 0.5f, 0f, 0f, 1f, 0f, 0.8f, 0.6f, 0.2f)
+        boneBuffer = MeshBuilder.floatBuffer(bones.toFloatArray())
     }
 
     private fun addLine(out: MutableList<Float>, x1: Float, y1: Float, z1: Float,
@@ -285,12 +386,14 @@ class SceneRenderer(
     override fun onSurfaceChanged(gl: GL10?, w: Int, h: Int) {
         width = max(1, w); height = max(1, h)
         GLES20.glViewport(0, 0, width, height)
-        Matrix.perspectiveM(projection, 0, 48f, width.toFloat() / height.toFloat(), 0.1f, 120f)
+        Matrix.perspectiveM(projection, 0, camFov, width.toFloat() / height.toFloat(), 0.1f, 120f)
     }
 
     override fun onDrawFrame(gl: GL10?) {
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
         if (program == 0) return
+
+        Matrix.perspectiveM(projection, 0, camFov, width.toFloat() / height.toFloat(), 0.1f, 120f)
 
         val yr = Math.toRadians(yaw.toDouble()).toFloat()
         val pr = Math.toRadians(pitch.toDouble()).toFloat()
@@ -315,22 +418,15 @@ class SceneRenderer(
             }
         }
 
+        if (skeletons.isNotEmpty() && editorState.mode == EditorMode.RIG_MODE) {
+            drawSkeleton(skeletons.first())
+        }
+
         importedBuffer?.let { buf ->
             GLES20.glUseProgram(program)
             Matrix.setIdentityM(model, 0)
             Matrix.translateM(model, 0, 0f, 1.5f, 0f)
-            Matrix.multiplyMM(temp, 0, view, 0, model, 0)
-            Matrix.multiplyMM(mvp, 0, projection, 0, temp, 0)
-            GLES20.glUniformMatrix4fv(uMvp, 1, false, mvp, 0)
-            GLES20.glUniform1f(uMetallic, importedMetallic)
-            GLES20.glUniform1f(uRoughness, importedRoughness)
-            GLES20.glUniform3f(uBaseColor, importedBaseColor[0], importedBaseColor[1], importedBaseColor[2])
-            GLES20.glUniform1f(uSelected, 0f)
-            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, getVbo(buf))
-            GLES20.glEnableVertexAttribArray(aPosition)
-            GLES20.glVertexAttribPointer(aPosition, 3, GLES20.GL_FLOAT, false, 0, 0)
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, min(importedTriangles * 3, buf.capacity() / 3))
-            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
+            drawImportedMesh(buf)
         }
 
         GLES20.glEnable(GLES20.GL_CULL_FACE)
@@ -355,19 +451,16 @@ class SceneRenderer(
             }
         } else {
             GLES20.glUseProgram(program)
-            val triBuf = meshCache[obj.type]?.first
+            val interleavedBuf = meshCache[obj.type]?.first
             val triCount = meshDataCache[obj.type]?.triangleCount ?: 0
-            if (triBuf != null && triCount > 0) {
-                Matrix.multiplyMM(temp, 0, view, 0, model, 0)
-                Matrix.multiplyMM(mvp, 0, projection, 0, temp, 0)
-                GLES20.glUniformMatrix4fv(uMvp, 1, false, mvp, 0)
-                GLES20.glUniform1f(uMetallic, obj.metallic)
-                GLES20.glUniform1f(uRoughness, obj.roughness)
-                GLES20.glUniform3f(uBaseColor, obj.color[0], obj.color[1], obj.color[2])
-                GLES20.glUniform1f(uSelected, if (isSelected) 1f else 0f)
-                GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, getVbo(triBuf))
+            if (interleavedBuf != null && triCount > 0) {
+                setupUniforms(obj, isSelected)
+                GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, getVbo(interleavedBuf))
                 GLES20.glEnableVertexAttribArray(aPosition)
-                GLES20.glVertexAttribPointer(aPosition, 3, GLES20.GL_FLOAT, false, 0, 0)
+                GLES20.glVertexAttribPointer(aPosition, 3, GLES20.GL_FLOAT, false, 24, 0)
+                GLES20.glEnableVertexAttribArray(aNormal)
+                GLES20.glVertexAttribPointer(aNormal, 3, GLES20.GL_FLOAT, false, 24, 12)
+                GLES20.glDisableVertexAttribArray(aVertexColor)
                 GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, triCount * 3)
                 GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
             }
@@ -381,12 +474,101 @@ class SceneRenderer(
         }
     }
 
+    private fun setupUniforms(obj: SceneObject, isSelected: Boolean) {
+        Matrix.multiplyMM(temp, 0, view, 0, model, 0)
+        Matrix.multiplyMM(mvp, 0, projection, 0, temp, 0)
+        Matrix.invertM(normalMat, 0, model, 0)
+        Matrix.transposeM(normalMat, 0, normalMat, 0)
+
+        GLES20.glUniformMatrix4fv(uMvp, 1, false, mvp, 0)
+        GLES20.glUniformMatrix4fv(uModel, 1, false, model, 0)
+        GLES20.glUniformMatrix4fv(uNormalMat, 1, false, normalMat, 0)
+        GLES20.glUniform1f(uMetallic, obj.metallic)
+        GLES20.glUniform1f(uRoughness, obj.roughness)
+        GLES20.glUniform3f(uBaseColor, obj.color[0], obj.color[1], obj.color[2])
+        GLES20.glUniform1f(uSelected, if (isSelected) 1f else 0f)
+        GLES20.glUniform1f(uEmissive, obj.emissive)
+        GLES20.glUniform1i(uHasVertexColors, 0)
+        GLES20.glUniform1i(uLightCount, lightCount)
+
+        if (uLightArray >= 0 && lightCount > 0) {
+            val lightPos = FloatArray(lightCount * 4)
+            val lightCols = FloatArray(lightCount * 3)
+            for (i in 0 until lightCount) {
+                lightPos[i * 4] = lightArray[i * 8]
+                lightPos[i * 4 + 1] = lightArray[i * 8 + 1]
+                lightPos[i * 4 + 2] = lightArray[i * 8 + 2]
+                lightPos[i * 4 + 3] = lightArray[i * 8 + 3]
+                lightCols[i * 3] = lightArray[i * 8 + 4]
+                lightCols[i * 3 + 1] = lightArray[i * 8 + 5]
+                lightCols[i * 3 + 2] = lightArray[i * 8 + 6]
+            }
+            GLES20.glUniform4fv(uLightArray, lightCount, lightPos, 0)
+            val lightColorLoc = GLES20.glGetUniformLocation(program, "uLightColors")
+            if (lightColorLoc >= 0) GLES20.glUniform3fv(lightColorLoc, lightCount, lightCols, 0)
+        }
+    }
+
+    private fun drawImportedMesh(buf: FloatBuffer) {
+        Matrix.multiplyMM(temp, 0, view, 0, model, 0)
+        Matrix.multiplyMM(mvp, 0, projection, 0, temp, 0)
+        Matrix.invertM(normalMat, 0, model, 0)
+        Matrix.transposeM(normalMat, 0, normalMat, 0)
+
+        GLES20.glUniformMatrix4fv(uMvp, 1, false, mvp, 0)
+        GLES20.glUniformMatrix4fv(uModel, 1, false, model, 0)
+        GLES20.glUniformMatrix4fv(uNormalMat, 1, false, normalMat, 0)
+        GLES20.glUniform1f(uMetallic, importedMetallic)
+        GLES20.glUniform1f(uRoughness, importedRoughness)
+        GLES20.glUniform3f(uBaseColor, importedBaseColor[0], importedBaseColor[1], importedBaseColor[2])
+        GLES20.glUniform1f(uSelected, 0f)
+        GLES20.glUniform1f(uEmissive, 0f)
+        GLES20.glUniform1i(uHasVertexColors, 0)
+        GLES20.glUniform1i(uLightCount, lightCount)
+
+        if (uLightArray >= 0 && lightCount > 0) {
+            val lightPos = FloatArray(lightCount * 4)
+            val lightCols = FloatArray(lightCount * 3)
+            for (i in 0 until lightCount) {
+                lightPos[i * 4] = lightArray[i * 8]
+                lightPos[i * 4 + 1] = lightArray[i * 8 + 1]
+                lightPos[i * 4 + 2] = lightArray[i * 8 + 2]
+                lightPos[i * 4 + 3] = lightArray[i * 8 + 3]
+                lightCols[i * 3] = lightArray[i * 8 + 4]
+                lightCols[i * 3 + 1] = lightArray[i * 8 + 5]
+                lightCols[i * 3 + 2] = lightArray[i * 8 + 6]
+            }
+            GLES20.glUniform4fv(uLightArray, lightCount, lightPos, 0)
+            val lightColorLoc = GLES20.glGetUniformLocation(program, "uLightColors")
+            if (lightColorLoc >= 0) GLES20.glUniform3fv(lightColorLoc, lightCount, lightCols, 0)
+        }
+
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, getVbo(buf))
+        GLES20.glEnableVertexAttribArray(aPosition)
+        GLES20.glVertexAttribPointer(aPosition, 3, GLES20.GL_FLOAT, false, 0, 0)
+        GLES20.glDisableVertexAttribArray(aNormal)
+        GLES20.glVertexAttrib3f(aNormal, 0f, 1f, 0f)
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, min(importedTriangles * 3, buf.capacity() / 3))
+        GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
+    }
+
     private fun drawMarker(obj: SceneObject) {
         GLES20.glUseProgram(lineProgram)
         Matrix.setIdentityM(model, 0)
         Matrix.translateM(model, 0, obj.x, obj.y + 0.7f, obj.z)
         val c = if (obj.type == "Light") floatArrayOf(1f, 0.85f, 0.3f) else floatArrayOf(0.3f, 0.8f, 1f)
         drawLines(markerBuffer, 6, model, c[0], c[1], c[2])
+    }
+
+    private fun drawSkeleton(skel: Skeleton) {
+        GLES20.glUseProgram(lineProgram)
+        for (bone in skel.bones) {
+            Matrix.setIdentityM(model, 0)
+            Matrix.translateM(model, 0, bone.x, bone.y, bone.z)
+            val color = if (bone.id == editorState.selectedBoneIndex)
+                floatArrayOf(0.9f, 0.8f, 0.2f) else floatArrayOf(0.8f, 0.6f, 0.2f)
+            drawLines(boneBuffer, 4, model, color[0], color[1], color[2])
+        }
     }
 
     private fun drawLines(buffer: FloatBuffer?, count: Int, modelMatrix: FloatArray, r: Float, g: Float, b: Float) {

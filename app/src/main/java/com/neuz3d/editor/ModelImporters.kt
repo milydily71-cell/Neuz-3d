@@ -2,17 +2,10 @@ package com.neuz3d.editor
 
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.BufferedReader
-import java.io.InputStreamReader
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets
 
-/**
- * Geometry-focused glTF 2.0 importer. Supports GLB 2.0 and glTF JSON with embedded
- * data-URI buffers; external .bin files, skins, morph targets and material textures
- * are intentionally rejected instead of silently importing broken geometry.
- */
 object GltfParser {
     private const val GLB_MAGIC = 0x46546C67
     private const val JSON_CHUNK = 0x4E4F534A
@@ -42,7 +35,8 @@ object GltfParser {
                 if (type == JSON_CHUNK) json = chunk
                 if (type == BIN_CHUNK) binaryChunk = chunk
             }
-            jsonText = String(json ?: error("GLB has no JSON chunk"), StandardCharsets.UTF_8).trimEnd('\u0000', ' ', '\n', '\r', '\t')
+            jsonText = String(json ?: error("GLB has no JSON chunk"), StandardCharsets.UTF_8)
+                .trimEnd('\u0000', ' ', '\n', '\r', '\t')
         } else {
             jsonText = String(bytes, StandardCharsets.UTF_8)
         }
@@ -87,55 +81,189 @@ object GltfParser {
         val accessors = root.getJSONArray("accessors")
         val meshes = root.getJSONArray("meshes")
         val output = ArrayList<Float>()
+        val normalOutput = ArrayList<Float>()
+        val boneList = ArrayList<BoneData>()
+        var skinWeights = FloatArray(0)
+        var skinJoints = IntArray(0)
+
+        val skins = root.optJSONArray("skins")
+        val jointsAccessor = root.optJSONArray("accessors")
+        val nodesJson = root.optJSONArray("nodes")
+
+        var skinData: JSONObject? = null
+        if (skins != null && skins.length() > 0) {
+            skinData = skins.getJSONObject(0)
+        }
+
         for (mi in 0 until meshes.length()) {
             val primitives = meshes.getJSONObject(mi).getJSONArray("primitives")
             for (pi in 0 until primitives.length()) {
                 val primitive = primitives.getJSONObject(pi)
                 require(primitive.optInt("mode", 4) == 4) { "Only TRIANGLES glTF primitives are supported" }
-                val positionIndex = primitive.getJSONObject("attributes").optInt("POSITION", -1)
+                val attrs = primitive.getJSONObject("attributes")
+                val positionIndex = attrs.optInt("POSITION", -1)
                 require(positionIndex >= 0) { "Primitive has no POSITION attribute" }
                 val positions = readFloatVec3(accessors, views, buffers, positionIndex)
+                val normalIndex = attrs.optInt("NORMAL", -1)
+                val hasNormals = normalIndex >= 0
+                val normals = if (hasNormals) readFloatVec3(accessors, views, buffers, normalIndex) else FloatArray(0)
                 val indicesIndex = primitive.optInt("indices", -1)
+                val hasSkin = attrs.optInt("JOINTS_0", -1) >= 0 && attrs.optInt("WEIGHTS_0", -1) >= 0
+                val jointsData = if (hasSkin) readJoints(accessors, views, buffers, attrs.getInt("JOINTS_0")) else IntArray(0)
+                val weightsData = if (hasSkin) readFloatVec4(accessors, views, buffers, attrs.getInt("WEIGHTS_0")) else FloatArray(0)
+
                 if (indicesIndex < 0) {
                     require(positions.size % 9 == 0) { "Non-indexed primitive vertex count must form triangles" }
                     output.addAll(positions.toList())
+                    if (hasNormals) normalOutput.addAll(normals.toList())
+                    if (hasSkin) {
+                        skinJoints = jointsData
+                        skinWeights = weightsData
+                    }
                 } else {
                     val indices = readIndices(accessors, views, buffers, indicesIndex)
                     require(indices.size % 3 == 0) { "Index count must form triangles" }
                     for (index in indices) {
                         require(index >= 0 && index * 3 + 2 < positions.size) { "Index is outside the position accessor" }
                         output.add(positions[index * 3]); output.add(positions[index * 3 + 1]); output.add(positions[index * 3 + 2])
+                        if (hasNormals) {
+                            normalOutput.add(normals[index * 3]); normalOutput.add(normals[index * 3 + 1]); normalOutput.add(normals[index * 3 + 2])
+                        }
                     }
+                    if (hasSkin) { skinJoints = jointsData; skinWeights = weightsData }
                 }
             }
         }
         require(output.isNotEmpty()) { "No triangle mesh geometry found" }
         require(output.size % 9 == 0) { "Imported geometry is not a triangle list" }
+
+        if (skinData != null && nodesJson != null) {
+            val jointsArray = skinData.optJSONArray("joints")
+            if (jointsArray != null) {
+                val inverseBindAccessor = skinData.optInt("inverseBindMatrices", -1)
+                val inverseBindMatrices = if (inverseBindAccessor >= 0)
+                    readFloatMat4Array(accessors, views, buffers, inverseBindAccessor) else emptyList()
+                for (ji in 0 until jointsArray.length()) {
+                    val nodeIdx = jointsArray.getInt(ji)
+                    if (nodeIdx < 0 || nodeIdx >= nodesJson.length()) continue
+                    val node = nodesJson.getJSONObject(nodeIdx)
+                    val name = node.optString("name", "Bone_$ji")
+                    val ibm = if (ji < inverseBindMatrices.size) inverseBindMatrices[ji] else FloatArray(16)
+                    boneList.add(BoneData(name, parentIndex = -1, inverseBind = ibm))
+                }
+            }
+        }
+
         val maxAbs = output.maxOf { kotlin.math.abs(it) }.coerceAtLeast(0.001f)
         val normalized = output.map { it / maxAbs * 1.5f }.toFloatArray()
-        return ImportedMesh(normalized, normalized.size / 9, baseColor, metallic, roughness)
+        val normalizedNormals = if (normalOutput.isNotEmpty()) {
+            val arr = normalOutput.toFloatArray()
+            for (i in arr.indices step 3) {
+                val l = kotlin.math.sqrt(arr[i]*arr[i] + arr[i+1]*arr[i+1] + arr[i+2]*arr[i+2]).coerceAtLeast(0.0001f)
+                arr[i] /= l; arr[i+1] /= l; arr[i+2] /= l
+            }
+            arr
+        } else FloatArray(0)
+
+        val triCount = normalized.size / 9
+        val finalNormals = if (normalizedNormals.isEmpty()) ModelingTools.computeNormals(normalized, triCount) else normalizedNormals
+
+        return ImportedMesh(
+            positions = normalized,
+            normals = finalNormals,
+            triangles = triCount,
+            baseColor = baseColor,
+            metallic = metallic,
+            roughness = roughness,
+            bones = boneList,
+            skinWeights = skinWeights,
+            skinJoints = skinJoints
+        )
     }
 
     private fun readFloatVec3(accessors: JSONArray, views: JSONArray, buffers: List<ByteArray>, index: Int): FloatArray {
         val accessor = accessors.getJSONObject(index)
         require(accessor.optInt("componentType") == 5126 && accessor.optString("type") == "VEC3") {
-            "POSITION accessor must use FLOAT VEC3"
+            "Accessor must use FLOAT VEC3"
         }
         val count = accessor.getInt("count")
         val viewIndex = accessor.getInt("bufferView")
         val view = views.getJSONObject(viewIndex)
         val buffer = buffers[view.getInt("buffer")]
         val stride = view.optInt("byteStride", 12)
-        require(stride >= 12) { "Invalid POSITION byteStride" }
+        require(stride >= 12) { "Invalid byteStride" }
         val start = view.optInt("byteOffset", 0) + accessor.optInt("byteOffset", 0)
         val out = FloatArray(count * 3)
         val data = ByteBuffer.wrap(buffer).order(ByteOrder.LITTLE_ENDIAN)
         for (i in 0 until count) {
             val offset = start + i * stride
-            require(offset >= 0 && offset.toLong() + 12 <= buffer.size.toLong()) { "POSITION accessor exceeds buffer bounds" }
-            out[i * 3] = data.getFloat(offset)
-            out[i * 3 + 1] = data.getFloat(offset + 4)
-            out[i * 3 + 2] = data.getFloat(offset + 8)
+            require(offset >= 0 && offset.toLong() + 12 <= buffer.size.toLong()) { "Accessor exceeds buffer bounds" }
+            out[i * 3] = data.getFloat(offset); out[i * 3 + 1] = data.getFloat(offset + 4); out[i * 3 + 2] = data.getFloat(offset + 8)
+        }
+        return out
+    }
+
+    private fun readFloatVec4(accessors: JSONArray, views: JSONArray, buffers: List<ByteArray>, index: Int): FloatArray {
+        val accessor = accessors.getJSONObject(index)
+        require(accessor.optInt("componentType") == 5126 && accessor.optString("type") == "VEC4") { "Accessor must use FLOAT VEC4" }
+        val count = accessor.getInt("count")
+        val viewIndex = accessor.getInt("bufferView")
+        val view = views.getJSONObject(viewIndex)
+        val buffer = buffers[view.getInt("buffer")]
+        val stride = view.optInt("byteStride", 16)
+        val start = view.optInt("byteOffset", 0) + accessor.optInt("byteOffset", 0)
+        val out = FloatArray(count * 4)
+        val data = ByteBuffer.wrap(buffer).order(ByteOrder.LITTLE_ENDIAN)
+        for (i in 0 until count) {
+            val offset = start + i * stride
+            out[i * 4] = data.getFloat(offset); out[i * 4 + 1] = data.getFloat(offset + 4)
+            out[i * 4 + 2] = data.getFloat(offset + 8); out[i * 4 + 3] = data.getFloat(offset + 12)
+        }
+        return out
+    }
+
+    private fun readJoints(accessors: JSONArray, views: JSONArray, buffers: List<ByteArray>, index: Int): IntArray {
+        val accessor = accessors.getJSONObject(index)
+        require(accessor.optString("type") == "VEC4") { "JOINTS must be VEC4" }
+        val componentType = accessor.getInt("componentType")
+        val bytesPer = when (componentType) { 5121 -> 1; 5123 -> 2; 5125 -> 4; else -> error("Unsupported joint component type") }
+        val count = accessor.getInt("count")
+        val viewIndex = accessor.getInt("bufferView")
+        val view = views.getJSONObject(viewIndex)
+        val buffer = buffers[view.getInt("buffer")]
+        val stride = view.optInt("byteStride", bytesPer * 4)
+        val start = view.optInt("byteOffset", 0) + accessor.optInt("byteOffset", 0)
+        val out = IntArray(count * 4)
+        val data = ByteBuffer.wrap(buffer).order(ByteOrder.LITTLE_ENDIAN)
+        for (i in 0 until count) {
+            for (j in 0 until 4) {
+                val offset = start + (i * 4 + j) * bytesPer
+                out[i * 4 + j] = when (componentType) {
+                    5121 -> data.get(offset).toInt() and 0xff
+                    5123 -> data.getShort(offset).toInt() and 0xffff
+                    else -> data.getInt(offset)
+                }
+            }
+        }
+        return out
+    }
+
+    private fun readFloatMat4Array(accessors: JSONArray, views: JSONArray, buffers: List<ByteArray>, index: Int): List<FloatArray> {
+        val accessor = accessors.getJSONObject(index)
+        require(accessor.optInt("componentType") == 5126 && accessor.optString("type") == "MAT4") { "Inverse bind must be FLOAT MAT4" }
+        val count = accessor.getInt("count")
+        val viewIndex = accessor.getInt("bufferView")
+        val view = views.getJSONObject(viewIndex)
+        val buffer = buffers[view.getInt("buffer")]
+        val stride = view.optInt("byteStride", 64)
+        val start = view.optInt("byteOffset", 0) + accessor.optInt("byteOffset", 0)
+        val out = ArrayList<FloatArray>()
+        val data = ByteBuffer.wrap(buffer).order(ByteOrder.LITTLE_ENDIAN)
+        for (i in 0 until count) {
+            val offset = start + i * stride
+            val mat = FloatArray(16)
+            for (j in 0 until 16) mat[j] = data.getFloat(offset + j * 4)
+            out.add(mat)
         }
         return out
     }
@@ -148,13 +276,11 @@ object GltfParser {
         val view = views.getJSONObject(accessor.getInt("bufferView"))
         val buffer = buffers[view.getInt("buffer")]
         val stride = view.optInt("byteStride", bytesPerIndex)
-        require(stride >= bytesPerIndex) { "Invalid index byteStride" }
         val start = view.optInt("byteOffset", 0) + accessor.optInt("byteOffset", 0)
         val data = ByteBuffer.wrap(buffer).order(ByteOrder.LITTLE_ENDIAN)
         val out = IntArray(accessor.getInt("count"))
         for (i in out.indices) {
             val offset = start + i * stride
-            require(offset >= 0 && offset.toLong() + bytesPerIndex <= buffer.size.toLong()) { "Index accessor exceeds buffer bounds" }
             out[i] = when (componentType) {
                 5121 -> data.get(offset).toInt() and 0xff
                 5123 -> data.getShort(offset).toInt() and 0xffff
@@ -166,9 +292,6 @@ object GltfParser {
     }
 }
 
-/**
- * Minimal Wavefront OBJ geometry importer: triangulates polygon faces and resolves negative indices.
- */
 object ObjParser {
     fun parse(source: String): ImportedMesh {
         val vertices = mutableListOf<FloatArray>()
@@ -196,6 +319,8 @@ object ObjParser {
         require(output.isNotEmpty()) { "No valid triangular face geometry found" }
         val maxAbs = output.maxOf { kotlin.math.abs(it) }.coerceAtLeast(0.001f)
         val normalized = output.map { it / maxAbs * 1.5f }.toFloatArray()
-        return ImportedMesh(normalized, normalized.size / 9)
+        val triCount = normalized.size / 9
+        val normals = ModelingTools.computeNormals(normalized, triCount)
+        return ImportedMesh(normalized, normals, triCount)
     }
 }

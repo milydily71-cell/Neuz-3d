@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="neuz_header_height">52dp</dimen>
+    <dimen name="neuz_toolbar_height">44dp</dimen>
+    <dimen name="neuz_button_height">38dp</dimen>
+    <dimen name="neuz_button_min_width">48dp</dimen>
+    <dimen name="neuz_status_height">28dp</dimen>
+    <dimen name="neuz_panel_padding">8dp</dimen>
+    <dimen name="neuz_item_spacing">3dp</dimen>
+    <dimen name="neuz_text_size_title">18sp</dimen>
+    <dimen name="neuz_text_size_label">13sp</dimen>
+    <dimen name="neuz_text_size_button">10sp</dimen>
+    <dimen name="neuz_text_size_status">11sp</dimen>
+    <dimen name="neuz_corner_radius">4dp</dimen>
+    <dimen name="neuz_divider_width">1dp</dimen>
+</resources>

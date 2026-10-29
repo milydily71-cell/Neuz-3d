@@ -3,7 +3,7 @@
     <application
         android:allowBackup="true"
         android:label="Neuz 3D"
-        android:theme="@android:style/Theme.Material.NoActionBar"
+        android:theme="@style/NeuzTheme"
         android:usesCleartextTraffic="false">
         <activity
             android:name=".MainActivity"

@@ -34,25 +34,39 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var objectLabel: TextView
     private lateinit var rendererPicker: Spinner
+    private lateinit var modeLabel: TextView
 
     private val scene = mutableListOf<SceneObject>()
+    private val lights = mutableListOf<SceneLight>()
+    private val cameras = mutableListOf<SceneCamera>()
+    private val skeletons = mutableListOf<Skeleton>()
+    private val editorState = EditorState()
+
     private val undoStack = java.util.ArrayDeque<String>()
     private val redoStack = java.util.ArrayDeque<String>()
-    private val keyframes = java.util.TreeMap<Int, List<SceneObject>>()
+    private val keyframes = java.util.TreeMap<Int, KeyframeData>()
     private val timelineHandler = Handler(Looper.getMainLooper())
     private var currentFrame = 0
     private var isPlaying = false
     private var playbackFps = 20
     private var nextId = 1
+    private var nextLightId = 1
+    private var nextCamId = 1
+    private var nextSkelId = 1
     private var selectedId = 1
+    private var selectedLightId = -1
+    private var selectedCamId = -1
     private var quality = 1
     private var rendererMode = 0
 
     private val prefs by lazy { getSharedPreferences("neuz3d_scene", MODE_PRIVATE) }
 
-    private val primitiveTypes = listOf(
-        "Cube", "Sphere", "Cylinder", "Cone", "Torus", "Plane", "Pyramid", "Capsule", "IcoSphere"
+    data class KeyframeData(
+        val objects: List<SceneObject>,
+        val lights: List<SceneLight>,
+        val bones: List<Bone>
     )
+
     private val primitiveLabels = mapOf(
         "+ Cube" to "Cube", "+ Sphere" to "Sphere", "+ Cylinder" to "Cylinder",
         "+ Cone" to "Cone", "+ Torus" to "Torus", "+ Plane" to "Plane",
@@ -65,6 +79,8 @@ class MainActivity : Activity() {
             Toast.makeText(this, "Native core failed to load: ${e.message}", Toast.LENGTH_LONG).show()
         }
         if (scene.isEmpty()) scene.add(SceneObject(nextId++, "Cube"))
+        if (lights.isEmpty()) lights.add(SceneLight(nextLightId++, "Sun", "Directional",
+            floatArrayOf(1f, 0.95f, 0.85f), 1.2f, 15f, 4f, 6f, 3f, false, true))
         buildEditorUi()
     }
 
@@ -74,7 +90,7 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.rgb(17, 19, 25))
         }
 
-        // Header
+        // Header bar
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -87,6 +103,14 @@ class MainActivity : Activity() {
             setTextColor(Color.WHITE)
             typeface = android.graphics.Typeface.DEFAULT_BOLD
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+        modeLabel = TextView(this).apply {
+            text = "Object Mode"
+            textSize = 11f
+            setTextColor(Color.rgb(200, 160, 50))
+            setPadding(dp(8), 0, dp(8), 0)
+        }
+        header.addView(modeLabel)
 
         rendererPicker = Spinner(this)
         rendererPicker.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item,
@@ -105,7 +129,7 @@ class MainActivity : Activity() {
                         } else {
                             status.text = "GLES ${renderer.glesMajorVersion / 10}.${renderer.glesMajorVersion % 10} context • ES 3.2 not confirmed by driver"
                             Toast.makeText(this@MainActivity,
-                                "This build requests an OpenGL ES 3.x context. It will not claim ES 3.2 unless the driver reports it.",
+                                "Requests an OpenGL ES 3.x context. Will not claim ES 3.2 unless the driver reports it.",
                                 Toast.LENGTH_LONG).show()
                         }
                     }
@@ -118,16 +142,27 @@ class MainActivity : Activity() {
         header.addView(rendererPicker, LinearLayout.LayoutParams(dp(140), dp(44)))
         root.addView(header)
 
-        // Primitive toolbar
+        // Editor mode switcher
+        val modeRow = horizontalStrip()
+        modeRow.addView(modeButton("Object") { setEditorMode(EditorMode.OBJECT_MODE) })
+        modeRow.addView(modeButton("Edit") { setEditorMode(EditorMode.EDIT_MODE) })
+        modeRow.addView(modeButton("Sculpt") { setEditorMode(EditorMode.SCULPT_MODE) })
+        modeRow.addView(modeButton("Vertex Paint") { setEditorMode(EditorMode.VERTEX_PAINT_MODE) })
+        modeRow.addView(modeButton("Weight Paint") { setEditorMode(EditorMode.WEIGHT_PAINT_MODE) })
+        modeRow.addView(modeButton("Rig") { setEditorMode(EditorMode.RIG_MODE) })
+        modeRow.addView(modeButton("Pose") { setEditorMode(EditorMode.POSE_MODE) })
+        root.addView(modeRow)
+
+        // Primitives toolbar
         val tools = horizontalStrip()
         primitiveLabels.forEach { (label, type) ->
             tools.addView(toolButton(label) { addObject(type) })
         }
-        tools.addView(toolButton("Light") { addObject("Light") })
-        tools.addView(toolButton("Camera") { addObject("Camera") })
+        tools.addView(toolButton("Light") { addLight() })
+        tools.addView(toolButton("Camera") { addCamera() })
         root.addView(tools)
 
-        // Selection and transform toolbar
+        // Transform toolbar
         val transformRow = horizontalStrip()
         transformRow.addView(toolButton("◀ Prev") { selectAdjacent(-1) })
         transformRow.addView(toolButton("Next ▶") { selectAdjacent(1) })
@@ -141,7 +176,7 @@ class MainActivity : Activity() {
         transformRow.addView(toolButton("Move Z-") { transformSelected(dz = -0.25f) })
         root.addView(transformRow)
 
-        // Rotation and scale toolbar
+        // Rotation/scale/misc toolbar
         val rotRow = horizontalStrip()
         rotRow.addView(toolButton("Rot Y+") { transformSelected(rotation = 15f) })
         rotRow.addView(toolButton("Rot Y-") { transformSelected(rotation = -15f) })
@@ -153,6 +188,17 @@ class MainActivity : Activity() {
         rotRow.addView(toolButton("Wireframe") { toggleWireframe() })
         rotRow.addView(toolButton("Hide") { toggleVisibility() })
         root.addView(rotRow)
+
+        // Modeling tools row
+        val modelRow = horizontalStrip()
+        modelRow.addView(toolButton("Subdivide") { applyModelingOp("subdivide") })
+        modelRow.addView(toolButton("Extrude") { applyModelingOp("extrude") })
+        modelRow.addView(toolButton("Bevel") { applyModelingOp("bevel") })
+        modelRow.addView(toolButton("Loop Cut") { applyModelingOp("loopcut") })
+        modelRow.addView(toolButton("Flip Normals") { applyModelingOp("flip") })
+        modelRow.addView(toolButton("Add Bone") { addBone() })
+        modelRow.addView(toolButton("Add Skeleton") { addSkeleton() })
+        root.addView(modelRow)
 
         // Viewport
         viewport = GLSurfaceView(this)
@@ -170,33 +216,34 @@ class MainActivity : Activity() {
         viewport.setOnTouchListener { _, event -> handleViewportTouch(event) }
         root.addView(viewport, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
-        // Object panel with properties
+        // Properties panel
         val objectPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(12), dp(7), dp(12), dp(7))
             setBackgroundColor(Color.rgb(25, 28, 37))
         }
         objectLabel = TextView(this).apply {
-            setTextColor(Color.WHITE)
-            textSize = 14f
-            text = "Hierarchy • Cube"
+            setTextColor(Color.WHITE); textSize = 14f; text = "Hierarchy • Cube"
         }
         objectPanel.addView(objectLabel)
 
-        // Properties buttons
+        // Action row
         val actionRow = horizontalStrip()
         actionRow.addView(toolButton("Undo") { undo() })
         actionRow.addView(toolButton("Redo") { redo() })
         actionRow.addView(toolButton("Material") { showMaterialEditor() })
-        actionRow.addView(toolButton("Color") { cycleColor() })
+        actionRow.addView(toolButton("Lighting") { showLightingEditor() })
+        actionRow.addView(toolButton("Camera") { showCameraEditor() })
+        actionRow.addView(toolButton("Vertex Paint") { showVertexPaintEditor() })
+        actionRow.addView(toolButton("Skel/Rig") { showSkeletonEditor() })
         actionRow.addView(toolButton("Reset View") { renderer.resetCamera() })
         actionRow.addView(toolButton("Snap") { toggleSnap() })
         objectPanel.addView(actionRow)
 
-        // Timeline
+        // Timeline row
         val timelineRow = horizontalStrip()
         timelineRow.addView(toolButton("Keyframe") { captureKeyframe() })
-        timelineRow.addView(toolButton("Frame −") { stepTimeline(-1) })
+        timelineRow.addView(toolButton("Frame -") { stepTimeline(-1) })
         timelineRow.addView(toolButton("Frame +") { stepTimeline(1) })
         timelineRow.addView(toolButton("Play/Stop") { toggleTimeline() })
         timelineRow.addView(toolButton("Clear Keys") { clearKeyframes() })
@@ -222,10 +269,8 @@ class MainActivity : Activity() {
         bottom.addView(bottomTools)
 
         status = TextView(this).apply {
-            text = "Starting renderer…"
-            textSize = 11f
-            setTextColor(Color.LTGRAY)
-            setPadding(0, dp(5), 0, 0)
+            text = "Starting renderer..."
+            textSize = 11f; setTextColor(Color.LTGRAY); setPadding(0, dp(5), 0, 0)
         }
         bottom.addView(status)
         root.addView(bottom)
@@ -233,6 +278,285 @@ class MainActivity : Activity() {
         syncSceneToRenderer()
     }
 
+    private fun setEditorMode(mode: EditorMode) {
+        editorState.mode = mode
+        val name = when (mode) {
+            EditorMode.OBJECT_MODE -> "Object Mode"
+            EditorMode.EDIT_MODE -> "Edit Mode"
+            EditorMode.SCULPT_MODE -> "Sculpt Mode"
+            EditorMode.VERTEX_PAINT_MODE -> "Vertex Paint"
+            EditorMode.WEIGHT_PAINT_MODE -> "Weight Paint"
+            EditorMode.RIG_MODE -> "Rig Mode"
+            EditorMode.POSE_MODE -> "Pose Mode"
+        }
+        modeLabel.text = name
+        Toast.makeText(this, "Mode: $name", Toast.LENGTH_SHORT).show()
+        syncSceneToRenderer()
+    }
+
+    // --- Lighting ---
+    private fun addLight() {
+        val light = SceneLight(nextLightId++, "Light ${nextLightId - 1}", "Point",
+            floatArrayOf(1f, 0.95f, 0.85f), 1.0f, 15f,
+            ((lights.size % 3) - 1) * 2f, 4f, ((lights.size / 3) % 3) * 2f)
+        lights.add(light)
+        selectedLightId = light.id
+        syncSceneToRenderer()
+        Toast.makeText(this, "Added ${light.name}", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun showLightingEditor() {
+        if (lights.isEmpty()) { Toast.makeText(this, "No lights. Add a Light first.", Toast.LENGTH_SHORT).show(); return }
+        val light = lights.firstOrNull { it.id == selectedLightId } ?: lights.first()
+        val dialogView = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(16), dp(20), dp(16))
+        }
+
+        val typeSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
+                listOf("Directional", "Point", "Spot"))
+            setSelection(listOf("Directional", "Point", "Spot").indexOf(light.type))
+        }
+        dialogView.addView(TextView(this).apply { text = "Light Type"; setTextColor(Color.WHITE) })
+        dialogView.addView(typeSpinner)
+
+        val intLabel = TextView(this).apply { text = "Intensity: ${"%.2f".format(Locale.US, light.intensity)}"; setTextColor(Color.WHITE) }
+        val intBar = SeekBar(this).apply {
+            max = 300; progress = (light.intensity * 100).toInt()
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                    light.intensity = p / 100f; intLabel.text = "Intensity: ${"%.2f".format(Locale.US, light.intensity)}"
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) { syncSceneToRenderer() }
+            })
+        }
+        dialogView.addView(intLabel); dialogView.addView(intBar)
+
+        for ((label, getter, setter) in listOf<Triple<String, () -> Float, (Float) -> Unit>>(
+            Triple("Red", { light.color[0] }, { light.color[0] = it }),
+            Triple("Green", { light.color[1] }, { light.color[1] = it }),
+            Triple("Blue", { light.color[2] }, { light.color[2] = it })
+        )) {
+            val l = TextView(this).apply { text = "$label: ${"%.2f".format(Locale.US, getter())}"; setTextColor(Color.WHITE) }
+            val b = SeekBar(this).apply {
+                max = 100; progress = (getter() * 100).toInt()
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                        setter(p / 100f); l.text = "$label: ${"%.2f".format(Locale.US, getter())}"
+                    }
+                    override fun onStartTrackingTouch(sb: SeekBar?) {}
+                    override fun onStopTrackingTouch(sb: SeekBar?) { syncSceneToRenderer() }
+                })
+            }
+            dialogView.addView(l); dialogView.addView(b)
+        }
+
+        for ((label, getter, setter) in listOf<Triple<String, () -> Float, (Float) -> Unit>>(
+            Triple("Position X", { light.x }, { light.x = it }),
+            Triple("Position Y", { light.y }, { light.y = it }),
+            Triple("Position Z", { light.z }, { light.z = it })
+        )) {
+            val l = TextView(this).apply { text = "$label: ${"%.2f".format(Locale.US, getter())}"; setTextColor(Color.WHITE) }
+            val b = SeekBar(this).apply {
+                max = 200; progress = ((getter() + 10f) * 10).toInt().coerceIn(0, 200)
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                        setter(p / 10f - 10f); l.text = "$label: ${"%.2f".format(Locale.US, getter())}"
+                    }
+                    override fun onStartTrackingTouch(sb: SeekBar?) {}
+                    override fun onStopTrackingTouch(sb: SeekBar?) { syncSceneToRenderer() }
+                })
+            }
+            dialogView.addView(l); dialogView.addView(b)
+        }
+
+        val enCheck = CheckBox(this).apply {
+            text = "Enabled"; isChecked = light.enabled
+            setOnCheckedChangeListener { _, c -> light.enabled = c; syncSceneToRenderer() }
+        }
+        dialogView.addView(enCheck)
+        val shadCheck = CheckBox(this).apply {
+            text = "Cast Shadows (planned)"; isChecked = light.castShadows
+            setOnCheckedChangeListener { _, c -> light.castShadows = c }
+        }
+        dialogView.addView(shadCheck)
+
+        typeSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(p: android.widget.AdapterView<*>?) {}
+            override fun onItemSelected(p: android.widget.AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                light.type = listOf("Directional", "Point", "Spot")[pos]; syncSceneToRenderer()
+            }
+        }
+
+        val scroll = ScrollView(this).apply { addView(dialogView) }
+        AlertDialog.Builder(this).setTitle("Lighting Editor — ${light.name}")
+            .setView(scroll)
+            .setPositiveButton("Done") { _, _ -> syncSceneToRenderer() }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    // --- Camera ---
+    private fun addCamera() {
+        val cam = SceneCamera(nextCamId++, "Camera ${nextCamId - 1}")
+        cameras.add(cam)
+        selectedCamId = cam.id
+        syncSceneToRenderer()
+        Toast.makeText(this, "Added ${cam.name}", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun showCameraEditor() {
+        if (cameras.isEmpty()) { Toast.makeText(this, "No cameras. Add a Camera first.", Toast.LENGTH_SHORT).show(); return }
+        val cam = cameras.firstOrNull { it.id == selectedCamId } ?: cameras.first()
+        val dialogView = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(16), dp(20), dp(16))
+        }
+
+        addSliderRow(dialogView, "FOV", cam.fov, 20f, 100f) { cam.fov = it; renderer.setFov(it); syncSceneToRenderer() }
+        addSliderRow(dialogView, "Near", cam.near, 0.1f, 5f) { cam.near = it; syncSceneToRenderer() }
+        addSliderRow(dialogView, "Far", cam.far, 50f, 300f) { cam.far = it; syncSceneToRenderer() }
+        addSliderRow(dialogView, "Pos X", cam.x, -20f, 20f) { cam.x = it; syncSceneToRenderer() }
+        addSliderRow(dialogView, "Pos Y", cam.y, -20f, 20f) { cam.y = it; syncSceneToRenderer() }
+        addSliderRow(dialogView, "Pos Z", cam.z, -20f, 20f) { cam.z = it; syncSceneToRenderer() }
+        addSliderRow(dialogView, "Look X", cam.lookAtX, -20f, 20f) { cam.lookAtX = it; syncSceneToRenderer() }
+        addSliderRow(dialogView, "Look Y", cam.lookAtY, -20f, 20f) { cam.lookAtY = it; syncSceneToRenderer() }
+        addSliderRow(dialogView, "Look Z", cam.lookAtZ, -20f, 20f) { cam.lookAtZ = it; syncSceneToRenderer() }
+
+        val camButtons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        camButtons.addView(toolButton("Dolly In") { CameraSystem.dolly(cam, -0.5f); syncSceneToRenderer() })
+        camButtons.addView(toolButton("Dolly Out") { CameraSystem.dolly(cam, 0.5f); syncSceneToRenderer() })
+        camButtons.addView(toolButton("Truck L") { CameraSystem.truck(cam, -0.5f); syncSceneToRenderer() })
+        camButtons.addView(toolButton("Truck R") { CameraSystem.truck(cam, 0.5f); syncSceneToRenderer() })
+        dialogView.addView(camButtons)
+
+        val activeCheck = CheckBox(this).apply {
+            text = "Set as active camera"; isChecked = cam.active
+            setOnCheckedChangeListener { _, c -> cameras.forEach { it.active = (it.id == cam.id && c) }; syncSceneToRenderer() }
+        }
+        dialogView.addView(activeCheck)
+
+        val scroll = ScrollView(this).apply { addView(dialogView) }
+        AlertDialog.Builder(this).setTitle("Camera Editor — ${cam.name}")
+            .setView(scroll)
+            .setPositiveButton("Done") { _, _ -> syncSceneToRenderer() }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    // --- Vertex Paint ---
+    private fun showVertexPaintEditor() {
+        val obj = scene.firstOrNull { it.id == selectedId } ?: run {
+            Toast.makeText(this, "Select an object first.", Toast.LENGTH_SHORT).show(); return
+        }
+        val dialogView = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(16), dp(20), dp(16))
+        }
+        dialogView.addView(TextView(this).apply {
+            text = "Vertex Paint Mode\nBrush color and controls:"; setTextColor(Color.WHITE); textSize = 14f
+        })
+
+        for ((label, getter, setter) in listOf<Triple<String, () -> Float, (Float) -> Unit>>(
+            Triple("Brush R", { editorState.brushColor[0] }, { editorState.brushColor[0] = it }),
+            Triple("Brush G", { editorState.brushColor[1] }, { editorState.brushColor[1] = it }),
+            Triple("Brush B", { editorState.brushColor[2] }, { editorState.brushColor[2] = it })
+        )) {
+            addSliderRow(dialogView, label, getter(), 0f, 1f) { setter(it) }
+        }
+        addSliderRow(dialogView, "Brush Radius", editorState.brushRadius, 0.1f, 3f) { editorState.brushRadius = it }
+        addSliderRow(dialogView, "Brush Strength", editorState.brushStrength, 0f, 1f) { editorState.brushStrength = it }
+
+        dialogView.addView(TextView(this).apply {
+            text = "Tap on the viewport in Vertex Paint mode to paint the selected object.\n" +
+                   "Vertex colors blend with the base material color in the shader."
+            setTextColor(Color.LTGRAY); textSize = 12f; setPadding(0, dp(8), 0, 0)
+        })
+
+        val paintBtn = toolButton("Enter Vertex Paint Mode") {
+            setEditorMode(EditorMode.VERTEX_PAINT_MODE)
+        }
+        dialogView.addView(paintBtn)
+
+        val scroll = ScrollView(this).apply { addView(dialogView) }
+        AlertDialog.Builder(this).setTitle("Vertex Paint — ${obj.name}")
+            .setView(scroll)
+            .setPositiveButton("Done", null)
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    // --- Skeleton / Rigging ---
+    private fun addSkeleton() {
+        val skel = SkeletonSystem.createSimpleSkeleton("Skeleton ${nextSkelId}", 3)
+        skel.id = nextSkelId++
+        skeletons.add(skel)
+        Toast.makeText(this, "Added ${skel.name} with ${skel.bones.size} bones", Toast.LENGTH_SHORT).show()
+        syncSceneToRenderer()
+    }
+
+    private fun addBone() {
+        if (skeletons.isEmpty()) { Toast.makeText(this, "Add a Skeleton first.", Toast.LENGTH_SHORT).show(); return }
+        val skel = skeletons.first()
+        val parentIdx = skel.bones.lastIndex
+        val bone = Bone(
+            id = skel.bones.size, name = "${skel.name}_Bone_${skel.bones.size}",
+            parentIndex = parentIdx, y = (skel.bones.size) * 0.5f,
+            restY = (skel.bones.size) * 0.5f,
+            inverseBind = FloatArray(16).also { android.opengl.Matrix.setIdentityM(it, 0) }
+        )
+        skel.bones.add(bone)
+        SkeletonSystem.computeInverseBind(skel)
+        Toast.makeText(this, "Added bone ${bone.name}", Toast.LENGTH_SHORT).show()
+        syncSceneToRenderer()
+    }
+
+    private fun showSkeletonEditor() {
+        if (skeletons.isEmpty()) { Toast.makeText(this, "No skeletons. Add one first.", Toast.LENGTH_SHORT).show(); return }
+        val skel = skeletons.first()
+        val dialogView = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(16), dp(20), dp(16))
+        }
+        dialogView.addView(TextView(this).apply {
+            text = "${skel.name} — ${skel.bones.size} bones"; setTextColor(Color.WHITE); textSize = 14f
+        })
+
+        skel.bones.forEachIndexed { idx, bone ->
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(3), 0, dp(3)) }
+            row.addView(TextView(this).apply {
+                text = if (bone.parentIndex >= 0) "  └ ${bone.name}" else "■ ${bone.name}"
+                setTextColor(if (idx == editorState.selectedBoneIndex) Color.rgb(200, 160, 50) else Color.WHITE)
+                textSize = 12f
+            })
+            row.addView(toolButton("Select") {
+                editorState.selectedBoneIndex = idx
+                setEditorMode(EditorMode.POSE_MODE)
+            })
+            row.addView(toolButton("Move Y+") {
+                bone.y += 0.2f; SkeletonSystem.computeInverseBind(skel); syncSceneToRenderer()
+            })
+            row.addView(toolButton("Rot Y+") {
+                bone.rotY += 15f; syncSceneToRenderer()
+            })
+            dialogView.addView(row)
+        }
+
+        val scroll = ScrollView(this).apply { addView(dialogView) }
+        AlertDialog.Builder(this).setTitle("Skeleton & Rigging")
+            .setView(scroll)
+            .setPositiveButton("Done", null)
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    // --- Modeling operations ---
+    private fun applyModelingOp(op: String) {
+        val obj = scene.firstOrNull { it.id == selectedId } ?: run {
+            Toast.makeText(this, "Select an object first.", Toast.LENGTH_SHORT).show(); return
+        }
+        Toast.makeText(this, "$op applied to ${obj.name} (demo)", Toast.LENGTH_SHORT).show()
+    }
+
+    // --- Vulkan info ---
     private fun showVulkanInfo(targetMinor: Int) {
         try {
             val info = nativeVulkanInfo()
@@ -251,8 +575,7 @@ class MainActivity : Activity() {
                 "The viewport remains on the OpenGL ES renderer."
             }
             AlertDialog.Builder(this).setTitle("Vulkan 1.$targetMinor Probe").setMessage(msg)
-                .setPositiveButton("OK") { _, _ -> rendererPicker.setSelection(0) }
-                .show()
+                .setPositiveButton("OK") { _, _ -> rendererPicker.setSelection(0) }.show()
             status.text = "Vulkan 1.$targetMinor ${if (supports) "supported" else "not supported"} • GLES viewport active"
         } catch (e: Exception) {
             status.text = "Vulkan probe failed: ${e.message}"
@@ -276,90 +599,23 @@ class MainActivity : Activity() {
     private fun showMaterialEditor() {
         val obj = scene.firstOrNull { it.id == selectedId } ?: return
         val dialogView = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(16), dp(20), dp(16))
+            orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(16), dp(20), dp(16))
         }
 
-        val metallicLabel = TextView(this).apply { text = "Metallic: ${"%.2f".format(Locale.US, obj.metallic)}"; setTextColor(Color.WHITE) }
-        val metallicBar = SeekBar(this).apply {
-            max = 100; progress = (obj.metallic * 100).toInt()
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
-                    obj.metallic = p / 100f
-                    metallicLabel.text = "Metallic: ${"%.2f".format(Locale.US, obj.metallic)}"
-                }
-                override fun onStartTrackingTouch(sb: SeekBar?) {}
-                override fun onStopTrackingTouch(sb: SeekBar?) { syncSceneToRenderer() }
-            })
-        }
-
-        val roughnessLabel = TextView(this).apply { text = "Roughness: ${"%.2f".format(Locale.US, obj.roughness)}"; setTextColor(Color.WHITE) }
-        val roughnessBar = SeekBar(this).apply {
-            max = 100; progress = (obj.roughness * 100).toInt()
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
-                    obj.roughness = (p / 100f).coerceIn(0.045f, 1f)
-                    roughnessLabel.text = "Roughness: ${"%.2f".format(Locale.US, obj.roughness)}"
-                }
-                override fun onStartTrackingTouch(sb: SeekBar?) {}
-                override fun onStopTrackingTouch(sb: SeekBar?) { syncSceneToRenderer() }
-            })
-        }
-
-        val redLabel = TextView(this).apply { text = "Red: ${"%.2f".format(Locale.US, obj.color[0])}"; setTextColor(Color.WHITE) }
-        val redBar = SeekBar(this).apply {
-            max = 100; progress = (obj.color[0] * 100).toInt()
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
-                    obj.color[0] = p / 100f
-                    redLabel.text = "Red: ${"%.2f".format(Locale.US, obj.color[0])}"
-                }
-                override fun onStartTrackingTouch(sb: SeekBar?) {}
-                override fun onStopTrackingTouch(sb: SeekBar?) { syncSceneToRenderer() }
-            })
-        }
-
-        val greenLabel = TextView(this).apply { text = "Green: ${"%.2f".format(Locale.US, obj.color[1])}"; setTextColor(Color.WHITE) }
-        val greenBar = SeekBar(this).apply {
-            max = 100; progress = (obj.color[1] * 100).toInt()
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
-                    obj.color[1] = p / 100f
-                    greenLabel.text = "Green: ${"%.2f".format(Locale.US, obj.color[1])}"
-                }
-                override fun onStartTrackingTouch(sb: SeekBar?) {}
-                override fun onStopTrackingTouch(sb: SeekBar?) { syncSceneToRenderer() }
-            })
-        }
-
-        val blueLabel = TextView(this).apply { text = "Blue: ${"%.2f".format(Locale.US, obj.color[2])}"; setTextColor(Color.WHITE) }
-        val blueBar = SeekBar(this).apply {
-            max = 100; progress = (obj.color[2] * 100).toInt()
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
-                    obj.color[2] = p / 100f
-                    blueLabel.text = "Blue: ${"%.2f".format(Locale.US, obj.color[2])}"
-                }
-                override fun onStartTrackingTouch(sb: SeekBar?) {}
-                override fun onStopTrackingTouch(sb: SeekBar?) { syncSceneToRenderer() }
-            })
-        }
+        addSliderRow(dialogView, "Metallic", obj.metallic, 0f, 1f) { obj.metallic = it; syncSceneToRenderer() }
+        addSliderRow(dialogView, "Roughness", obj.roughness, 0.045f, 1f) { obj.roughness = it; syncSceneToRenderer() }
+        addSliderRow(dialogView, "Red", obj.color[0], 0f, 1f) { obj.color[0] = it; syncSceneToRenderer() }
+        addSliderRow(dialogView, "Green", obj.color[1], 0f, 1f) { obj.color[1] = it; syncSceneToRenderer() }
+        addSliderRow(dialogView, "Blue", obj.color[2], 0f, 1f) { obj.color[2] = it; syncSceneToRenderer() }
+        addSliderRow(dialogView, "Emissive", obj.emissive, 0f, 2f) { obj.emissive = it; syncSceneToRenderer() }
 
         val wireCheck = CheckBox(this).apply {
-            text = "Wireframe mode"
-            isChecked = obj.wireframe
-            setOnCheckedChangeListener { _, checked -> obj.wireframe = checked; syncSceneToRenderer() }
+            text = "Wireframe mode"; isChecked = obj.wireframe
+            setOnCheckedChangeListener { _, c -> obj.wireframe = c; syncSceneToRenderer() }
         }
-
-        dialogView.addView(metallicLabel); dialogView.addView(metallicBar)
-        dialogView.addView(roughnessLabel); dialogView.addView(roughnessBar)
-        dialogView.addView(redLabel); dialogView.addView(redBar)
-        dialogView.addView(greenLabel); dialogView.addView(greenBar)
-        dialogView.addView(blueLabel); dialogView.addView(blueBar)
         dialogView.addView(wireCheck)
 
         val scroll = ScrollView(this).apply { addView(dialogView) }
-
         AlertDialog.Builder(this).setTitle("Material Editor — ${obj.name}")
             .setView(scroll)
             .setPositiveButton("Done") { _, _ -> checkpoint(); syncSceneToRenderer() }
@@ -367,6 +623,31 @@ class MainActivity : Activity() {
             .show()
     }
 
+    // --- Slider helper ---
+    private fun addSliderRow(
+        parent: LinearLayout, label: String, current: Float, min: Float, max: Float, onChange: (Float) -> Unit
+    ) {
+        val labelView = TextView(this).apply {
+            text = "$label: ${"%.2f".format(Locale.US, current)}"; setTextColor(Color.WHITE)
+        }
+        val range = ((max - min) * 100).toInt().coerceAtLeast(1)
+        val progress = ((current - min) * 100).toInt().coerceIn(0, range)
+        val bar = SeekBar(this).apply {
+            max = range; this.progress = progress
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                    val val_ = min + p / 100f
+                    labelView.text = "$label: ${"%.2f".format(Locale.US, val_)}"
+                    onChange(val_)
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+        parent.addView(labelView); parent.addView(bar)
+    }
+
+    // --- Snap, speed, keyframes ---
     private var snapEnabled = false
     private fun toggleSnap() {
         snapEnabled = !snapEnabled
@@ -376,56 +657,58 @@ class MainActivity : Activity() {
     private fun adjustSpeed(delta: Int) {
         playbackFps = (playbackFps + delta).coerceIn(5, 60)
         status.text = "Timeline playback speed: $playbackFps fps"
-        Toast.makeText(this, "Playback: $playbackFps fps", Toast.LENGTH_SHORT).show()
     }
 
     private fun clearKeyframes() {
         if (keyframes.isEmpty()) { Toast.makeText(this, "No keyframes to clear.", Toast.LENGTH_SHORT).show(); return }
-        keyframes.clear()
-        prefs.edit().remove("timeline_keyframes").apply()
-        status.text = "Timeline cleared"
-        Toast.makeText(this, "All keyframes cleared.", Toast.LENGTH_SHORT).show()
+        keyframes.clear(); prefs.edit().remove("timeline_keyframes").apply()
+        status.text = "Timeline cleared"; Toast.makeText(this, "All keyframes cleared.", Toast.LENGTH_SHORT).show()
     }
 
+    // --- UI builders ---
     private fun horizontalStrip() = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-        setPadding(dp(5), dp(3), dp(5), dp(3))
+        orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(5), dp(3), dp(5), dp(3)); setBackgroundColor(Color.rgb(29, 32, 40))
     }
 
     private fun toolButton(label: String, action: () -> Unit): Button =
         Button(this).apply {
-            text = label
-            textSize = 10f
-            isAllCaps = false
-            setPadding(dp(5), 0, dp(5), 0)
-            minWidth = 0
-            minimumWidth = 0
+            text = label; textSize = 10f; isAllCaps = false
+            setPadding(dp(5), 0, dp(5), 0); minWidth = 0; minimumWidth = 0
             setOnClickListener { action() }
             layoutParams = LinearLayout.LayoutParams(0, dp(42), 1f).apply {
-                marginStart = dp(2)
-                marginEnd = dp(2)
+                marginStart = dp(2); marginEnd = dp(2)
             }
         }
 
+    private fun modeButton(label: String, action: () -> Unit): Button =
+        Button(this).apply {
+            text = label; textSize = 10f; isAllCaps = false
+            setPadding(dp(5), 0, dp(5), 0); minWidth = 0; minimumWidth = 0
+            setOnClickListener { action() }
+            setBackgroundColor(Color.rgb(45, 48, 58))
+            setTextColor(Color.rgb(200, 200, 210))
+            layoutParams = LinearLayout.LayoutParams(0, dp(36), 1f).apply {
+                marginStart = dp(2); marginEnd = dp(2)
+            }
+        }
+
+    // --- Undo/Redo ---
     private fun checkpoint() {
         undoStack.addLast(sceneJson())
         while (undoStack.size > 80) undoStack.removeFirst()
         redoStack.clear()
     }
-
     private fun undo() {
         if (undoStack.isEmpty()) { Toast.makeText(this, "Nothing to undo.", Toast.LENGTH_SHORT).show(); return }
-        redoStack.addLast(sceneJson())
-        restoreSceneJson(undoStack.removeLast())
+        redoStack.addLast(sceneJson()); restoreSceneJson(undoStack.removeLast())
     }
-
     private fun redo() {
         if (redoStack.isEmpty()) { Toast.makeText(this, "Nothing to redo.", Toast.LENGTH_SHORT).show(); return }
-        undoStack.addLast(sceneJson())
-        restoreSceneJson(redoStack.removeLast())
+        undoStack.addLast(sceneJson()); restoreSceneJson(redoStack.removeLast())
     }
 
+    // --- Selection ---
     private fun selectAdjacent(direction: Int) {
         if (scene.isEmpty()) return
         val visibleScene = scene.filter { it.visible }
@@ -435,53 +718,37 @@ class MainActivity : Activity() {
         syncSceneToRenderer()
     }
 
+    // --- Object management ---
     private fun addObject(type: String) {
         checkpoint()
         val name = "$type ${nextId}"
         val x = ((scene.size % 3) - 1) * 1.4f
         val z = ((scene.size / 3) % 3) * 1.4f
-        val obj = SceneObject(nextId++, name, type, x = x, z = z,
-            color = defaultColorForType(type))
-        scene.add(obj)
-        selectedId = obj.id
-        syncSceneToRenderer()
-        Toast.makeText(this, "Added $name", Toast.LENGTH_SHORT).show()
+        val obj = SceneObject(nextId++, name, type, x = x, z = z, color = defaultColorForType(type))
+        scene.add(obj); selectedId = obj.id
+        syncSceneToRenderer(); Toast.makeText(this, "Added $name", Toast.LENGTH_SHORT).show()
     }
 
     private fun defaultColorForType(type: String): FloatArray = when (type) {
-        "Cube" -> floatArrayOf(0.3f, 0.58f, 0.95f)
-        "Sphere" -> floatArrayOf(0.35f, 0.82f, 0.58f)
-        "Cylinder" -> floatArrayOf(0.85f, 0.55f, 0.25f)
-        "Cone" -> floatArrayOf(0.9f, 0.65f, 0.2f)
-        "Torus" -> floatArrayOf(0.75f, 0.4f, 0.85f)
-        "Plane" -> floatArrayOf(0.5f, 0.5f, 0.55f)
-        "Pyramid" -> floatArrayOf(0.95f, 0.8f, 0.3f)
-        "Capsule" -> floatArrayOf(0.2f, 0.7f, 0.9f)
-        "IcoSphere" -> floatArrayOf(0.6f, 0.9f, 0.4f)
-        "Light" -> floatArrayOf(1f, 0.85f, 0.3f)
-        "Camera" -> floatArrayOf(0.3f, 0.8f, 1f)
-        else -> floatArrayOf(0.5f, 0.5f, 0.5f)
+        "Cube" -> floatArrayOf(0.3f, 0.58f, 0.95f); "Sphere" -> floatArrayOf(0.35f, 0.82f, 0.58f)
+        "Cylinder" -> floatArrayOf(0.85f, 0.55f, 0.25f); "Cone" -> floatArrayOf(0.9f, 0.65f, 0.2f)
+        "Torus" -> floatArrayOf(0.75f, 0.4f, 0.85f); "Plane" -> floatArrayOf(0.5f, 0.5f, 0.55f)
+        "Pyramid" -> floatArrayOf(0.95f, 0.8f, 0.3f); "Capsule" -> floatArrayOf(0.2f, 0.7f, 0.9f)
+        "IcoSphere" -> floatArrayOf(0.6f, 0.9f, 0.4f); "Light" -> floatArrayOf(1f, 0.85f, 0.3f)
+        "Camera" -> floatArrayOf(0.3f, 0.8f, 1f); else -> floatArrayOf(0.5f, 0.5f, 0.5f)
     }
 
     private fun duplicateSelected() {
         val obj = scene.firstOrNull { it.id == selectedId } ?: return
         checkpoint()
         val copy = obj.copy(id = nextId++, name = "${obj.type} ${nextId - 1}", x = obj.x + 0.5f, z = obj.z + 0.5f)
-        scene.add(copy)
-        selectedId = copy.id
-        syncSceneToRenderer()
-        Toast.makeText(this, "Duplicated ${obj.name}", Toast.LENGTH_SHORT).show()
+        scene.add(copy); selectedId = copy.id
+        syncSceneToRenderer(); Toast.makeText(this, "Duplicated ${obj.name}", Toast.LENGTH_SHORT).show()
     }
 
     private fun deleteSelected() {
-        if (scene.size <= 1) {
-            Toast.makeText(this, "Keep at least one scene object.", Toast.LENGTH_SHORT).show()
-            return
-        }
-        checkpoint()
-        scene.removeAll { it.id == selectedId }
-        selectedId = scene.last().id
-        syncSceneToRenderer()
+        if (scene.size <= 1) { Toast.makeText(this, "Keep at least one scene object.", Toast.LENGTH_SHORT).show(); return }
+        checkpoint(); scene.removeAll { it.id == selectedId }; selectedId = scene.last().id; syncSceneToRenderer()
     }
 
     private fun transformSelected(dx: Float = 0f, dy: Float = 0f, dz: Float = 0f,
@@ -492,8 +759,7 @@ class MainActivity : Activity() {
         obj.x = if (snapEnabled) (obj.x + dx).roundToQuarter() else obj.x + dx
         obj.y = if (snapEnabled) (obj.y + dy).roundToQuarter() else obj.y + dy
         obj.z = if (snapEnabled) (obj.z + dz).roundToQuarter() else obj.z + dz
-        obj.rotation += rotation
-        obj.rotX += rotX
+        obj.rotation += rotation; obj.rotX += rotX
         obj.scale = (obj.scale + scale).coerceIn(0.2f, 4f)
         syncSceneToRenderer()
     }
@@ -503,24 +769,19 @@ class MainActivity : Activity() {
     private fun resetTransform() {
         val obj = scene.firstOrNull { it.id == selectedId } ?: return
         checkpoint()
-        obj.x = 0f; obj.y = 0f; obj.z = 0f
-        obj.rotation = 0f; obj.rotX = 0f; obj.rotZ = 0f
-        obj.scale = 1f
+        obj.x = 0f; obj.y = 0f; obj.z = 0f; obj.rotation = 0f; obj.rotX = 0f; obj.rotZ = 0f; obj.scale = 1f
         syncSceneToRenderer()
     }
 
     private fun toggleWireframe() {
         val obj = scene.firstOrNull { it.id == selectedId } ?: return
-        checkpoint()
-        obj.wireframe = !obj.wireframe
-        syncSceneToRenderer()
+        checkpoint(); obj.wireframe = !obj.wireframe; syncSceneToRenderer()
         Toast.makeText(this, "Wireframe: ${if (obj.wireframe) "on" else "off"}", Toast.LENGTH_SHORT).show()
     }
 
     private fun toggleVisibility() {
         val obj = scene.firstOrNull { it.id == selectedId } ?: return
-        obj.visible = !obj.visible
-        syncSceneToRenderer()
+        obj.visible = !obj.visible; syncSceneToRenderer()
         Toast.makeText(this, "${obj.name}: ${if (obj.visible) "visible" else "hidden"}", Toast.LENGTH_SHORT).show()
     }
 
@@ -532,31 +793,34 @@ class MainActivity : Activity() {
         floatArrayOf(0.9f, 0.3f, 0.3f), floatArrayOf(0.5f, 0.5f, 0.55f)
     )
     private var colorIdx = 0
-    private fun cycleColor() {
-        val obj = scene.firstOrNull { it.id == selectedId } ?: return
-        checkpoint()
-        colorIdx = (colorIdx + 1) % colorPresets.size
-        obj.color = colorPresets[colorIdx].copyOf()
-        syncSceneToRenderer()
-    }
 
+    // --- Scene sync ---
     private fun syncSceneToRenderer() {
         if (!::renderer.isInitialized) return
-        renderer.setScene(scene.map { it.copy() }, selectedId, quality)
+        renderer.setScene(scene.map { it.copy() }, selectedId, quality, lights, cameras, skeletons, editorState)
         val visible = scene.filter { it.visible }
         objectLabel.text = "Hierarchy • " + visible.joinToString("   ") {
             if (it.id == selectedId) "▶ ${it.name}" else it.name
         }
     }
 
+    // --- Scene serialization ---
     private fun sceneJson(): String = JSONObject()
-        .put("format", "neuz3d-scene").put("version", 2)
+        .put("format", "neuz3d-scene").put("version", 3)
         .put("nextId", nextId).put("selectedId", selectedId)
-        .put("objects", objectsToJsonArray(scene)).toString(2)
+        .put("objects", objectsToJsonArray(scene))
+        .put("lights", lightsToJsonArray(lights))
+        .put("cameras", camerasToJsonArray(cameras))
+        .put("skeletons", skeletonsToJsonArray(skeletons))
+        .toString(2)
 
     private fun keyframesJson(): String {
         val root = JSONObject()
-        keyframes.forEach { (frame, objects) -> root.put(frame.toString(), objectsToJsonArray(objects)) }
+        keyframes.forEach { (frame, kf) ->
+            val kfObj = JSONObject()
+            kfObj.put("objects", objectsToJsonArray(kf.objects))
+            root.put(frame.toString(), kfObj)
+        }
         return root.toString()
     }
 
@@ -568,17 +832,18 @@ class MainActivity : Activity() {
         while (keys.hasNext()) {
             val frameText = keys.next()
             val frame = frameText.toIntOrNull() ?: continue
-            val array = json.optJSONArray(frameText) ?: continue
+            val kfObj = json.optJSONObject(frameText) ?: continue
+            val arr = kfObj.optJSONArray("objects") ?: continue
             val list = ArrayList<SceneObject>()
-            for (i in 0 until array.length()) {
-                list.add(SceneObject.fromJson(array.getJSONObject(i)))
-            }
-            keyframes[frame] = list
+            for (i in 0 until arr.length()) list.add(SceneObject.fromJson(arr.getJSONObject(i)))
+            keyframes[frame] = KeyframeData(list, emptyList(), emptyList())
         }
     }
 
+    // --- Timeline ---
     private fun captureKeyframe() {
-        keyframes[currentFrame] = scene.map { it.copy() }
+        val currentBones = if (skeletons.isNotEmpty()) skeletons.first().bones.map { it } else emptyList()
+        keyframes[currentFrame] = KeyframeData(scene.map { it.copy() }, lights.map { it }, currentBones)
         prefs.edit().putString("timeline_keyframes", keyframesJson()).apply()
         status.text = "Timeline • frame $currentFrame • ${keyframes.size} keyframe(s)"
         Toast.makeText(this, "Keyframe stored at frame $currentFrame.", Toast.LENGTH_SHORT).show()
@@ -604,14 +869,11 @@ class MainActivity : Activity() {
 
     private fun toggleTimeline() {
         if (isPlaying) {
-            isPlaying = false
-            timelineHandler.removeCallbacks(timelineTick)
-            status.text = "Timeline paused at frame $currentFrame"
-            return
+            isPlaying = false; timelineHandler.removeCallbacks(timelineTick)
+            status.text = "Timeline paused at frame $currentFrame"; return
         }
         if (keyframes.size < 2) {
-            Toast.makeText(this, "Add at least two keyframes at different frames to play animation.", Toast.LENGTH_LONG).show()
-            return
+            Toast.makeText(this, "Add at least two keyframes at different frames.", Toast.LENGTH_LONG).show(); return
         }
         isPlaying = true
         if (currentFrame < keyframes.firstKey() || currentFrame >= keyframes.lastKey()) currentFrame = keyframes.firstKey()
@@ -625,21 +887,17 @@ class MainActivity : Activity() {
         val span = (rightEntry.key - leftEntry.key).coerceAtLeast(1)
         val t = ((frame - leftEntry.key).toFloat() / span).coerceIn(0f, 1f)
         val eased = easeInOutCubic(t)
-        val rightById = rightEntry.value.associateBy { it.id }
-        val animated = leftEntry.value.map { a ->
+        val rightById = rightEntry.value.objects.associateBy { it.id }
+        val animated = leftEntry.value.objects.map { a ->
             val b = rightById[a.id] ?: a
             a.copy(
-                x = a.x + (b.x - a.x) * eased,
-                y = a.y + (b.y - a.y) * eased,
-                z = a.z + (b.z - a.z) * eased,
+                x = a.x + (b.x - a.x) * eased, y = a.y + (b.y - a.y) * eased, z = a.z + (b.z - a.z) * eased,
                 scale = a.scale + (b.scale - a.scale) * eased,
                 rotation = a.rotation + (b.rotation - a.rotation) * eased,
-                rotX = a.rotX + (b.rotX - a.rotX) * eased,
-                rotZ = a.rotZ + (b.rotZ - a.rotZ) * eased
+                rotX = a.rotX + (b.rotX - a.rotX) * eased, rotZ = a.rotZ + (b.rotZ - a.rotZ) * eased
             )
         }
-        scene.clear()
-        scene.addAll(animated)
+        scene.clear(); scene.addAll(animated)
         if (scene.none { it.id == selectedId } && scene.isNotEmpty()) selectedId = scene.first().id
         syncSceneToRenderer()
     }
@@ -647,63 +905,65 @@ class MainActivity : Activity() {
     private fun easeInOutCubic(t: Float): Float =
         if (t < 0.5f) 4f * t * t * t else 1f - ((-2f * t + 2f).let { it * it * it }) / 2f
 
+    // --- Save/Load ---
     private fun saveScene() {
-        prefs.edit()
-            .putString("scene_json", sceneJson())
-            .putString("timeline_keyframes", keyframesJson())
-            .putInt("next_id", nextId)
-            .putInt("selected_id", selectedId)
-            .apply()
+        prefs.edit().putString("scene_json", sceneJson()).putString("timeline_keyframes", keyframesJson())
+            .putInt("next_id", nextId).putInt("selected_id", selectedId).apply()
         Toast.makeText(this, "Scene saved on this device.", Toast.LENGTH_SHORT).show()
     }
 
     private val exportRequest = 7403
     private fun exportScene() {
         val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "application/json"
-            putExtra(Intent.EXTRA_TITLE, "neuz-scene.json")
+            addCategory(Intent.CATEGORY_OPENABLE); type = "application/json"; putExtra(Intent.EXTRA_TITLE, "neuz-scene.json")
         }
         startActivityForResult(intent, exportRequest)
     }
 
     private fun loadScene() {
         val raw = prefs.getString("scene_json", null)
-        if (raw == null) {
-            Toast.makeText(this, "No saved scene yet. Use Save Scene first.", Toast.LENGTH_SHORT).show()
-            return
-        }
+        if (raw == null) { Toast.makeText(this, "No saved scene yet.", Toast.LENGTH_SHORT).show(); return }
         try {
-            restoreSceneJson(raw)
-            restoreKeyframes(prefs.getString("timeline_keyframes", null))
-            currentFrame = 0
-            Toast.makeText(this, "Scene and timeline loaded.", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
-            Toast.makeText(this, "Could not load scene: ${e.message}", Toast.LENGTH_LONG).show()
-        }
+            restoreSceneJson(raw); restoreKeyframes(prefs.getString("timeline_keyframes", null))
+            currentFrame = 0; Toast.makeText(this, "Scene and timeline loaded.", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) { Toast.makeText(this, "Could not load scene: ${e.message}", Toast.LENGTH_LONG).show() }
     }
 
     private fun restoreSceneJson(raw: String) {
         val wrapper = if (raw.trimStart().startsWith("[")) null else JSONObject(raw)
         val array = if (wrapper == null) org.json.JSONArray(raw) else wrapper.getJSONArray("objects")
         scene.clear()
-        for (i in 0 until array.length()) {
-            scene.add(SceneObject.fromJson(array.getJSONObject(i)))
-        }
+        for (i in 0 until array.length()) scene.add(SceneObject.fromJson(array.getJSONObject(i)))
         if (scene.isEmpty()) scene.add(SceneObject(nextId++, "Cube"))
         nextId = maxOf(wrapper?.optInt("nextId", 1) ?: 1, (scene.maxOfOrNull { it.id } ?: 0) + 1)
         selectedId = wrapper?.optInt("selectedId", scene.first().id) ?: scene.first().id
         if (scene.none { it.id == selectedId }) selectedId = scene.first().id
+
+        wrapper?.optJSONArray("lights")?.let { arr ->
+            lights.clear()
+            for (i in 0 until arr.length()) lights.add(SceneLight.fromJson(arr.getJSONObject(i)))
+            nextLightId = (lights.maxOfOrNull { it.id } ?: 0) + 1
+        }
+        wrapper?.optJSONArray("cameras")?.let { arr ->
+            cameras.clear()
+            for (i in 0 until arr.length()) cameras.add(SceneCamera.fromJson(arr.getJSONObject(i)))
+            nextCamId = (cameras.maxOfOrNull { it.id } ?: 0) + 1
+        }
+        wrapper?.optJSONArray("skeletons")?.let { arr ->
+            skeletons.clear()
+            for (i in 0 until arr.length()) skeletons.add(Skeleton.fromJson(arr.getJSONObject(i)))
+            nextSkelId = (skeletons.maxOfOrNull { it.id } ?: 0) + 1
+        }
         syncSceneToRenderer()
     }
 
+    // --- Model import ---
     private val objPickerRequest = 7402
     private var importFormat = "obj"
     private fun pickModel(format: String) {
         importFormat = format
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "*/*"
+            addCategory(Intent.CATEGORY_OPENABLE); type = "*/*"
         }
         startActivityForResult(intent, objPickerRequest)
     }
@@ -718,37 +978,31 @@ class MainActivity : Activity() {
                 contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(sceneJson()) }
                     ?: error("Could not create output file")
                 Toast.makeText(this, "Scene JSON exported.", Toast.LENGTH_SHORT).show()
-            } catch (e: Exception) {
-                Toast.makeText(this, "Export failed: ${e.message}", Toast.LENGTH_LONG).show()
-            }
+            } catch (e: Exception) { Toast.makeText(this, "Export failed: ${e.message}", Toast.LENGTH_LONG).show() }
             return
         }
         if (requestCode != objPickerRequest) return
         try {
-            val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                ?: error("Could not open selected file")
+            val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: error("Could not open selected file")
             val parsed = if (GltfParser.isGltf(bytes)) GltfParser.parse(bytes)
                 else ObjParser.parse(String(bytes, StandardCharsets.UTF_8))
             renderer.setImportedMesh(parsed)
-            status.text = "Imported model • ${parsed.triangles} triangles • PBR metallic ${"%.2f".format(Locale.US, parsed.metallic)} • roughness ${"%.2f".format(Locale.US, parsed.roughness)}"
-            Toast.makeText(this, "Model geometry loaded into viewport.", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
-            Toast.makeText(this, "Model import failed: ${e.message}", Toast.LENGTH_LONG).show()
-        }
+            val skinInfo = if (parsed.bones.isNotEmpty()) " • ${parsed.bones.size} bones" else ""
+            status.text = "Imported • ${parsed.triangles} tris • normals: ${if (parsed.normals.isNotEmpty()) "yes" else "no"}$skinInfo"
+            Toast.makeText(this, "Model loaded into viewport.", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) { Toast.makeText(this, "Import failed: ${e.message}", Toast.LENGTH_LONG).show() }
     }
 
     private fun cycleQuality() {
-        quality = (quality + 1) % 3
-        syncSceneToRenderer()
-        Toast.makeText(this, "Viewport quality: ${listOf("Low", "Balanced", "High")[quality]}", Toast.LENGTH_SHORT).show()
+        quality = (quality + 1) % 3; syncSceneToRenderer()
+        Toast.makeText(this, "Quality: ${listOf("Low", "Balanced", "High")[quality]}", Toast.LENGTH_SHORT).show()
     }
 
-    private var lastX = 0f
-    private var lastY = 0f
-    private var touchStartX = 0f
-    private var touchStartY = 0f
-    private var touchMoved = false
-    private var lastDistance = 0f
+    // --- Touch handling ---
+    private var lastX = 0f; private var lastY = 0f
+    private var touchStartX = 0f; private var touchStartY = 0f
+    private var touchMoved = false; private var lastDistance = 0f
+
     private fun handleViewportTouch(event: MotionEvent): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
@@ -766,33 +1020,49 @@ class MainActivity : Activity() {
                     if (lastDistance > 0f && d > 0f) renderer.zoomBy(lastDistance / d)
                     lastDistance = d
                 } else {
-                    val dx = event.x - lastX
-                    val dy = event.y - lastY
+                    val dx = event.x - lastX; val dy = event.y - lastY
                     if (kotlin.math.abs(event.x - touchStartX) + kotlin.math.abs(event.y - touchStartY) > dp(10)) touchMoved = true
-                    if (touchMoved) renderer.orbit(dx * 0.45f, dy * 0.35f)
+                    if (touchMoved) {
+                        if (editorState.mode == EditorMode.VERTEX_PAINT_MODE) {
+                            handleVertexPaint(event.x, event.y)
+                        } else {
+                            renderer.orbit(dx * 0.45f, dy * 0.35f)
+                        }
+                    }
                 }
-                lastX = event.x
-                lastY = event.y
+                lastX = event.x; lastY = event.y
                 return true
             }
             MotionEvent.ACTION_UP -> {
                 if (!touchMoved && event.pointerCount == 1) {
-                    val pickX = event.x
-                    val pickY = event.y
-                    viewport.queueEvent { renderer.pickAt(pickX, pickY) }
+                    if (editorState.mode == EditorMode.VERTEX_PAINT_MODE) {
+                        handleVertexPaint(event.x, event.y)
+                    } else {
+                        viewport.queueEvent { renderer.pickAt(event.x, event.y) }
+                    }
                 }
-                lastDistance = 0f
-                return true
+                lastDistance = 0f; return true
             }
             MotionEvent.ACTION_CANCEL -> { lastDistance = 0f; return true }
         }
         return true
     }
 
+    private fun handleVertexPaint(touchX: Float, touchY: Float) {
+        val obj = scene.firstOrNull { it.id == selectedId } ?: return
+        val meshData = MeshBuilder.build(obj.type)
+        val targetPos = floatArrayOf(obj.x, obj.y + 0.5f, obj.z)
+        val painted = ModelingTools.paintVertexByProximity(
+            meshData.vertices, obj.vertexColors,
+            targetPos, editorState.brushColor, editorState.brushRadius, editorState.brushStrength
+        )
+        obj.vertexColors = painted
+        syncSceneToRenderer()
+    }
+
     private fun distance(e: MotionEvent): Float {
         if (e.pointerCount < 2) return 0f
-        val dx = e.getX(0) - e.getX(1)
-        val dy = e.getY(0) - e.getY(1)
+        val dx = e.getX(0) - e.getX(1); val dy = e.getY(0) - e.getY(1)
         return kotlin.math.sqrt(dx * dx + dy * dy)
     }
 
@@ -800,8 +1070,7 @@ class MainActivity : Activity() {
 
     override fun onResume() { super.onResume(); if (::viewport.isInitialized) viewport.onResume() }
     override fun onPause() {
-        isPlaying = false
-        timelineHandler.removeCallbacks(timelineTick)
+        isPlaying = false; timelineHandler.removeCallbacks(timelineTick)
         if (::viewport.isInitialized) viewport.onPause()
         super.onPause()
     }
